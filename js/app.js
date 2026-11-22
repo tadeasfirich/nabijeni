@@ -283,8 +283,9 @@ async function runRead(d) {
   d.status = 'reading'; d.msg = '';
   draftUi?.status();
   try {
-    const r = await readPhoto(d.blob, s);
+    const r = await readPhoto(d.blob, s, (msg) => { if (draft === d) { d.progress = msg; draftUi?.status(); } });
     if (draft !== d) return;
+    d.progress = '';
     d.src = r.values;
     const n = Object.keys(r.values).length;
     d.status = n ? 'ok' : 'err';
@@ -408,7 +409,7 @@ async function viewDraft() {
     if (st === 'manual') { mount(statusBox); statusBox.hidden = true; return; }
     statusBox.hidden = false;
     statusBox.className = `read-status ${st}`;
-    if (st === 'reading') mount(statusBox, h('span', { class: 'spin' }), h('span', null, `Čtu údaje z fotky (${readerName(s)})…`));
+    if (st === 'reading') mount(statusBox, h('span', { class: 'spin' }), h('span', null, `Čtu údaje z fotky (${readerName(s)})…`, d.progress ? h('small', null, d.progress) : null));
     else if (st === 'ok') mount(statusBox, mark('ok'), h('span', null, 'Přečteno z fotky – zkontroluj a potvrď.', d.msg ? h('small', null, d.msg) : null));
     else if (st === 'none') mount(statusBox, mark('opt'), h('span', null, 'Vyplň údaje z fotky. ', h('a', { href: '#/nastaveni' }, 'Zapnout automatické čtení')));
     else mount(statusBox, mark('bad'), h('span', null, d.msg || 'Nepodařilo se přečíst.'),
@@ -722,15 +723,19 @@ async function viewSettings() {
   };
   drawReader();
   const testReader = async () => {
-    mount(testOut, h('p', { class: 'muted' }, h('span', { class: 'spin' }), ' Čtu ukázkovou fotku…'));
+    const prog = h('span', null, ' Čtu ukázkovou fotku…');
+    mount(testOut, h('p', { class: 'muted' }, h('span', { class: 'spin' }), prog));
     try {
       const blob = await (await fetch('docs/test-foto.jpg', { cache: 'no-store' })).blob();
-      const res = await readPhoto(blob, await D.getSettings());
+      const cur = await D.getSettings();
+      const res = await readPhoto(blob, cur, (msg) => { prog.textContent = ` ${msg}`; });
       const v = res.values;
       const ok = v.soc === 48 && v.odo === 90887;
       mount(testOut, h('p', { class: ok ? 'ok-line' : 'warn-line' }, mark(ok ? 'ok' : 'bad'),
         `Přečteno: baterie ${v.soc ?? '?'} %, cíl ${v.target ?? '?'} %, zbývá ${v.remainMin != null ? duration(v.remainMin) : '?'}, ${v.kw ?? '?'} kW, tachometr ${v.odo ?? '?'} km.`,
-        ok ? ' Sedí (48 %, 90 887 km).' : ' Správně je 48 %, 9 h 50 min, 3,5 kW, 90 887 km.'));
+        ok ? ' Sedí (48 %, 90 887 km).' : ' Správně je 48 %, 9 h 50 min, 3,5 kW, 90 887 km.'),
+        res.model && cur.reader.provider !== 'claude' && res.model !== cur.reader.geminiModel ? h('p', { class: 'small' }, `Zvolený model nestíhal, přečetl to ${res.model}. `,
+          h('button', { class: 'btn small', onclick: async () => { await D.saveSettings({ reader: { geminiModel: res.model } }); toast('Model změněn.', { kind: 'ok' }); render(); } }, `Používat ${res.model}`)) : null);
     } catch (e) {
       mount(testOut, h('p', { class: 'form-err' }, e.message));
     }

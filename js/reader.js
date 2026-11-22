@@ -37,9 +37,13 @@ async function withTimeout(promise, ms, ctrl) {
   try { return await promise; } finally { clearTimeout(t); }
 }
 
-async function readGemini(b64, r) {
-  const model = (r.geminiModel || 'gemini-flash-latest').trim();
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(r.geminiKey.trim())}`;
+// Záložní modely, když zvolený model Google zrovna nestíhá (503/429/500) nebo neexistuje (404).
+export const GEMINI_FALLBACKS = ['gemini-flash-latest', 'gemini-flash-lite-latest'];
+const RETRY = new Set([429, 500, 502, 503, 504]);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+async function geminiOnce(b64, model, key) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
   const ctrl = new AbortController();
   const res = await withTimeout(fetch(url, {
     method: 'POST',
@@ -51,9 +55,37 @@ async function readGemini(b64, r) {
     }),
   }), 45000, ctrl);
   const j = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(apiError('Gemini', res.status, j?.error?.message));
+  if (!res.ok) {
+    const err = new Error(apiError('Gemini', res.status, j?.error?.message));
+    err.status = res.status;
+    throw err;
+  }
   const text = (j.candidates?.[0]?.content?.parts || []).map((p) => p.text || '').join('');
   return extractJson(text);
+}
+
+// Zvolený model → 2 opakování s pauzou → záložní modely. Vrací i model, který nakonec přečetl.
+async function readGemini(b64, r, onStatus) {
+  const key = r.geminiKey.trim();
+  const chosen = (r.geminiModel || GEMINI_FALLBACKS[0]).trim();
+  const models = [chosen, ...GEMINI_FALLBACKS.filter((m) => m !== chosen)];
+  let lastErr;
+  for (const model of models) {
+    for (let attempt = 0; attempt < (model === chosen ? 3 : 2); attempt++) {
+      try {
+        const out = await geminiOnce(b64, model, key);
+        out.__model = model;
+        return out;
+      } catch (e) {
+        lastErr = e;
+        if (!RETRY.has(e.status) && e.status !== 404) throw e;   // špatný klíč apod. – nemá smysl zkoušet dál
+        if (e.status === 404) break;                              // model neexistuje → hned další
+        if (attempt < 2) { onStatus?.(`Google je přetížený, zkouším znovu…`); await sleep(1500 * (attempt + 1)); }
+      }
+    }
+    onStatus?.(`Zkouším jiný model…`);
+  }
+  throw lastErr;
 }
 
 async function readClaude(b64, r) {
@@ -87,22 +119,23 @@ function apiError(name, status, msg) {
   if (status === 401 || status === 403) return `${name}: klíč nefunguje (${status}). Zkontroluj ho v Nastavení.`;
   if (status === 404) return `${name}: model nenalezen – v Nastavení zkus jiný název modelu. (${msg || ''})`;
   if (status === 429) return `${name}: vyčerpaný limit, zkus to za chvíli.`;
+  if (status === 503 || status === 500 || status === 502 || status === 504) return `${name} je teď přetížený (${status}) – zkus to za chvíli, nebo vyplň údaje ručně.`;
   return `${name}: chyba ${status}${msg ? ` – ${msg}` : ''}`;
 }
 
 // → { values: {soc, target, remainMin, kw, odo}, raw, charging }
-export async function readPhoto(blob, settings) {
+export async function readPhoto(blob, settings, onStatus) {
   if (!navigator.onLine) throw new Error('Jsi offline – údaje vyplň ručně.');
   if (!readerReady(settings)) throw new Error('Čtení fotek není nastavené – přidej klíč v Nastavení.');
   const b64 = await blobToBase64(blob);
   const r = settings.reader;
   let raw;
   try {
-    raw = r.provider === 'claude' ? await readClaude(b64, r) : await readGemini(b64, r);
+    raw = r.provider === 'claude' ? await readClaude(b64, r) : await readGemini(b64, r, onStatus);
   } catch (e) {
     if (e.name === 'AbortError') throw new Error('Čtení trvá moc dlouho – vyplň údaje ručně.');
     if (e instanceof TypeError) throw new Error('Nepodařilo se spojit s AI – vyplň údaje ručně.');
     throw e;
   }
-  return { values: sanitizeRead(raw), raw, charging: raw?.charging !== false };
+  return { values: sanitizeRead(raw), raw, charging: raw?.charging !== false, model: raw?.__model || null };
 }
