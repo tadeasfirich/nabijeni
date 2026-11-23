@@ -4,7 +4,7 @@
 
 import { h, mount, mark, toast, modal, ask, confirmDialog, formDialog, fmt, downloadBlob, uid } from './ui.js';
 import * as D from './data.js';
-import { calc, sumUp, calibration, check, coefFor, seasonFor, estimatedEnd, isRunning, monthKey, monthRange, inRange, SEASON_LABEL, round, DEFAULTS } from './model.js';
+import { calc, sumUp, calibration, check, coefFor, seasonFor, estimatedEnd, overdue, isRunning, monthKey, monthRange, inRange, SEASON_LABEL, round, DEFAULTS } from './model.js';
 import { preparePhoto } from './photo.js';
 import { readPhoto, readerReady, readerName } from './reader.js';
 import { syncNow, scheduleSync, markDirty, syncState, onSyncStatus, syncConfigured, testConnection, isBusy } from './sync.js';
@@ -118,7 +118,31 @@ const ROUTES = [
   [/^#\/nastaveni$/, 'nastaveni', () => viewSettings()],
 ];
 
+let autoBusy = false;
+async function autoFinish() {
+  if (autoBusy) return 0;
+  autoBusy = true;
+  try {
+    const s = await D.getSettings();
+    const due = overdue(await D.listSessions());
+    for (const run of due) {
+      run.end = { t: estimatedEnd(run), soc: run.target ?? s.target, mode: 'auto' };
+      run.status = 'done';
+      await D.saveSession(run, { silent: true });
+    }
+    if (due.length) {
+      const c = calc(due[0]);
+      toast(due.length === 1
+        ? `Nabíjení od ${fmt.short(due[0].start.t)} uzavřeno jako dobito do ${due[0].end.soc} % (${nf(c.grid)} kWh · ${kc(c.cost)}). Jinak? Otevři ho a uprav.`
+        : `Uzavřeno ${due.length} nabíjení jako dobito. Jinak? Otevři je a uprav.`, { kind: 'ok', timeout: 8000 });
+      if (syncConfigured(s)) markDirty();
+    }
+    return due.length;
+  } finally { autoBusy = false; }
+}
+
 async function render() {
+  await autoFinish();
   const hash = location.hash || '#/';
   let found = ROUTES.find(([re]) => re.test(hash));
   if (!found) { location.hash = '#/'; return; }
@@ -200,9 +224,10 @@ function runningCard(run, s) {
   const est = estimatedEnd(run);
   const estLine = h('p', { class: 'run-est' });
   const upd = () => {
-    if (!est) { estLine.textContent = 'Odhad konce neznám (chybí „Do dobití zbývá“).'; return; }
+    if (!est) { estLine.textContent = 'Odhad konce neznám.'; return; }
     const left = (Date.parse(est) - Date.now()) / 60000;
-    estLine.textContent = left > 0 ? `Dobito asi ${fmt.short(est)} – za ${duration(left)}` : `Mělo by být dobito od ${fmt.short(est)}`;
+    if (left <= 0) { clearInterval(tick); render(); return; }
+    estLine.textContent = `Dobito asi ${fmt.short(est)} – za ${duration(left)}`;
   };
   upd();
   tick = setInterval(upd, 30000);
@@ -504,7 +529,7 @@ async function viewDetail(id) {
   const rowsTbl = [
     ['Začátek', `${fmt.dt(x.start.t)} · ${x.start.soc} %`],
     x.start.remainMin != null ? ['Do dobití zbývalo', duration(x.start.remainMin)] : null,
-    x.end ? ['Konec', `${fmt.dt(x.end.t)} · ${x.end.soc} % · ${x.end.mode === 'dobito' ? `dobito do ${x.end.soc} %` : MODE_LABEL[x.end.mode]}`] : ['Konec', 'nabíjí se'],
+    x.end ? ['Konec', `${fmt.dt(x.end.t)} · ${x.end.soc} % · ${x.end.mode === 'dobito' ? `dobito do ${x.end.soc} %` : MODE_LABEL[x.end.mode] || ''}`] : ['Konec', 'nabíjí se'],
     c.hours !== null ? ['Doba', duration(c.hours * 60)] : null,
     ['Tachometr', x.start.odo ? `${x.start.odo.toLocaleString('cs-CZ')} km` : '–'],
     ['Koeficient', c.measured ? `${nf(c.realCoef, 3)} (z elektroměru)` : `${SEASON_LABEL[x.season]} × ${nf(x.coef)}`],
@@ -574,7 +599,11 @@ async function editSession(x) {
   next.start.soc = Math.round(n('startSoc'));
   next.start.remainMin = n('remain');
   next.start.odo = n('odo');
-  if (x.end) { next.end.t = fromLocalInput(r.endT) || x.end.t; next.end.soc = Math.round(n('endSoc')); }
+  if (x.end) {
+    next.end.t = fromLocalInput(r.endT) || x.end.t;
+    next.end.soc = Math.round(n('endSoc'));
+    if (next.end.soc !== x.end.soc || next.end.t !== x.end.t) next.end.mode = x.end.mode === 'drive' ? 'drive' : 'upraveno';
+  }
   next.coef = n('coef') ?? x.coef;
   next.price = n('price') ?? x.price;
   next.note = r.note;
@@ -865,6 +894,7 @@ async function init() {
   });
   onSyncStatus((st, busy) => updatePill(st, busy));
   window.addEventListener('hashchange', render);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && /^#\/?$|^#\/n\//.test(location.hash || '#/')) render(); });
   window.addEventListener('online', () => { updatePill(); scheduleSync(500); });
   window.addEventListener('offline', () => updatePill());
   await render();

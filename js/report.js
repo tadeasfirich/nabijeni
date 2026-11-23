@@ -4,8 +4,8 @@ import { writeWorkbook, S } from './xlsx.js';
 import { calc, sumUp, round, SEASON_LABEL } from './model.js';
 import { fmt, h } from './ui.js';
 
-export const MODE_LABEL = { dobito: 'dobito do limitu', drive: 'ukončeno dříve', rucne: 'ukončeno ručně' };
-const modeText = (s) => (s.end ? (s.end.mode === 'dobito' ? `dobito do ${s.end.soc} %` : MODE_LABEL[s.end.mode] || '') : 'probíhá');
+export const MODE_LABEL = { dobito: 'dobito do limitu', auto: 'dobito (uzavřeno automaticky)', drive: 'ukončeno dříve', rucne: 'ukončeno ručně', upraveno: 'upraveno ručně' };
+const modeText = (s) => (s.end ? (s.end.mode === 'dobito' || s.end.mode === 'auto' ? `dobito do ${s.end.soc} %` : MODE_LABEL[s.end.mode] || '') : 'probíhá');
 
 export const nf = (v, d = 2) => (v === null || v === undefined || !Number.isFinite(Number(v)) ? '–'
   : Number(v).toLocaleString('cs-CZ', { minimumFractionDigits: d, maximumFractionDigits: d }));

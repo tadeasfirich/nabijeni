@@ -38,10 +38,24 @@ export const SEASON_LABEL = { zima: 'zima', leto: 'léto' };
 const num = (v) => (v === null || v === undefined || v === '' || !Number.isFinite(Number(v)) ? null : Number(v));
 
 // Odhad, kdy auto dojede do limitu (z údaje „Do dobití zbývá“ na fotce startu).
+// Když údaj chybí, dopočítá se: (cíl − start) % × kapacita × koeficient ÷ výkon.
 export function estimatedEnd(sess) {
   const st = sess?.start;
-  if (!st || num(st.remainMin) === null) return null;
-  return new Date(Date.parse(st.t) + num(st.remainMin) * 60000).toISOString();
+  if (!st || !st.t) return null;
+  let min = num(st.remainMin);
+  if (min === null) {
+    const target = num(sess.target) ?? num(st.target) ?? DEFAULTS.target;
+    const kw = num(st.kw) ?? num(sess.kw) ?? DEFAULTS.kw;
+    if (num(st.soc) === null || !kw) return null;
+    const kwh = Math.max(0, target - num(st.soc)) / 100 * (num(sess.capacity) ?? DEFAULTS.capacity) * (num(sess.coef) ?? 1.2);
+    min = Math.round(kwh / kw * 60);
+  }
+  return new Date(Date.parse(st.t) + min * 60000).toISOString();
+}
+
+// Nabíjení, jejichž odhadovaný konec už minul → mají se uzavřít jako dobito do limitu.
+export function overdue(list, now = Date.now()) {
+  return list.filter((s) => isRunning(s) && estimatedEnd(s) && Date.parse(estimatedEnd(s)) <= now);
 }
 
 // Hlavní výpočet jednoho nabíjení.
