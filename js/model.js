@@ -59,48 +59,79 @@ export function overdue(list, now = Date.now()) {
 }
 
 // Hlavní výpočet jednoho nabíjení.
+//
+// Výkon na palubní desce (např. 3,5 kW) je odběr ze zásuvky (ověřeno: měření Kony, odhady času v autě).
+// Proto:  ze sítě (kWh) = doba nabíjení × výkon        → to se platí
+//         do baterie    = nabito % × kapacita          → kolik se uložilo
+//         poměr         = ze sítě ÷ do baterie         → skutečné ztráty (u 3,5 kW kolem 1,25)
+// Přednost: elektroměr → doba × výkon → odhad (nabito % × kapacita × koeficient), když chybí čas nebo výkon.
+// Import ze staré tabulky: kWh z tabulky = ze sítě (hodiny × výkon), do baterie = odhad ÷ koeficient.
 export function calc(sess) {
   const st = sess?.start;
   const en = sess?.end;
-  const out = { dSoc: null, battery: null, grid: null, cost: null, hours: null, timeKwh: null, coef: num(sess?.coef), measured: false, realCoef: null };
+  const out = {
+    dSoc: null, battery: null, grid: null, cost: null, hours: null, chargeHours: null, kw: null,
+    timeKwh: null, socKwh: null, coef: num(sess?.coef), ratio: null, method: null,
+    measured: false, realCoef: null, imported: false, batteryEstimated: false, warn: null,
+  };
+  let gridRaw = null;
   if (!st) return out;
-  // import ze staré tabulky: kWh jsou dané (hodiny × výkon), procenta baterie nejsou
-  // kWh z tabulky = údaj podle času (hodiny × výkon) → do baterie; ze sítě = × koeficient
-  const imp = num(sess?.importKwh);
+  const meter = num(sess.meterKwh);
+  const hasMeter = meter !== null && meter > 0;
+  const imp = num(sess.importKwh);
+
   if (imp !== null) {
     out.imported = true;
-    out.battery = round(imp, 2);
-    out.hours = num(sess.hours);
-    const meter = num(sess.meterKwh);
-    if (meter !== null && meter > 0) {
-      out.grid = round(meter, 2);
-      out.measured = true;
-      out.realCoef = imp > 0 ? round(meter / imp, 3) : null;
-    } else {
-      out.grid = round(imp * (out.coef ?? 1), 2);
+    out.hours = out.chargeHours = num(sess.hours);
+    out.kw = num(sess.kw);
+    out.timeKwh = round(imp, 2);
+    out.battery = round(imp / (out.coef || 1), 2);
+    out.batteryEstimated = true;
+    gridRaw = hasMeter ? meter : imp;
+    out.method = hasMeter ? 'meter' : 'import';
+  } else {
+    const rawHours = en && en.t ? (Date.parse(en.t) - Date.parse(st.t)) / 3600000 : null;
+    if (rawHours !== null) out.hours = round(rawHours, 2);
+    if (en && num(en.soc) !== null && num(st.soc) !== null) {
+      out.dSoc = Math.max(0, num(en.soc) - num(st.soc));
+      out.battery = round(out.dSoc / 100 * (num(sess.capacity) ?? DEFAULTS.capacity), 2);
+      out.socKwh = round(out.battery * (out.coef ?? 1), 2);
     }
-    out.cost = round(out.grid * (num(sess.price) ?? 0), 2);
-    return out;
-  }
-  if (en && num(en.soc) !== null && num(st.soc) !== null) {
-    out.dSoc = Math.max(0, num(en.soc) - num(st.soc));
-    out.battery = round(out.dSoc / 100 * (num(sess.capacity) ?? DEFAULTS.capacity), 2);
-    const meter = num(sess.meterKwh);
-    if (meter !== null && meter > 0) {
-      out.grid = round(meter, 2);
-      out.measured = true;
-      out.realCoef = out.battery > 0 ? round(meter / out.battery, 3) : null;
-    } else {
-      out.grid = round(out.battery * (out.coef ?? 1), 2);
+    out.kw = num(st.kw) ?? num(sess.kw);
+    if (out.hours !== null && out.hours > 0 && out.kw) {
+      // Když baterie skončila na limitu, auto nenabíjelo déle, než trvá dojet do limitu.
+      let ch = rawHours;
+      const target = num(sess.target) ?? num(st.target);
+      const est = estimatedEnd(sess);
+      if (target !== null && num(en?.soc) !== null && num(en.soc) >= target && est) {
+        ch = Math.min(ch, Math.max(0, (Date.parse(est) - Date.parse(st.t)) / 3600000));
+      }
+      out.chargeHours = round(ch, 2);
+      out.timeKwhRaw = ch * out.kw;
+      out.timeKwh = round(out.timeKwhRaw, 2);
     }
-    out.cost = round(out.grid * (num(sess.price) ?? 0), 2);
+    if (out.battery !== null) {
+      // kontrola: ze sítě musí být víc než do baterie a ztráty nemůžou být obří
+      const r = out.timeKwh && out.battery ? out.timeKwh / out.battery : null;
+      const timeOk = out.timeKwh > 0 && (out.battery === 0 || (r >= 1 && r <= 1.6));
+      if (out.timeKwh > 0 && !timeOk) out.warn = `Doba × výkon (${round(out.timeKwh, 2)} kWh) nesedí s nabitými % – zkontroluj čas konce a výkon. Použit odhad podle % baterie.`;
+      if (hasMeter) { gridRaw = meter; out.method = 'meter'; }
+      else if (timeOk) { gridRaw = out.timeKwhRaw; out.method = 'time'; }
+      else { gridRaw = out.battery * (out.coef ?? 1); out.method = 'soc'; }
+    }
+    delete out.timeKwhRaw;
   }
-  if (en && en.t) {
-    out.hours = round((Date.parse(en.t) - Date.parse(st.t)) / 3600000, 2);
-    if (num(sess.kw) && out.hours > 0) out.timeKwh = round(out.hours * num(sess.kw), 2);
+  if (gridRaw !== null) {
+    out.grid = round(gridRaw, 2);
+    out.cost = round(gridRaw * (num(sess.price) ?? 0), 2);
   }
+  if (out.grid && out.battery) out.ratio = round(out.grid / out.battery, 2);
+  out.measured = out.method === 'meter';
+  if (out.measured && out.battery) out.realCoef = round(meter / out.battery, 3);
   return out;
 }
+
+export const METHOD_LABEL = { time: 'doba × výkon', soc: 'odhad: % × koeficient', meter: 'elektroměr', import: 'import (doba × výkon)' };
 
 export function sumUp(list) {
   const t = { count: 0, battery: 0, grid: 0, cost: 0, hours: 0, measured: 0 };

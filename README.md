@@ -21,19 +21,26 @@ Starší fotku lze vybrat z galerie – čas se vezme z fotky (EXIF).
 ## Výpočet
 
 ```
-ze sítě (kWh) = nabito % ÷ 100 × 64 kWh × koeficient ztrát
-částka (Kč)   = ze sítě × cena za kWh (výchozí 6,70 Kč)
+ze sítě (kWh)   = doba nabíjení × výkon z palubní desky (3,5 kW)   ← to se platí
+do baterie (kWh) = nabito % ÷ 100 × 64 kWh
+ztráty           = ze sítě ÷ do baterie (u 3,5 kW v zimě kolem 1,25–1,28)
+částka (Kč)      = ze sítě × cena za kWh
 ```
 
-Koeficient: **léto 1,18, zima 1,25** (zimní měsíce listopad–březen, dají se přepnout). Každé nabíjení si pamatuje
-koeficient a cenu, se kterými vzniklo – změna v nastavení nepřepíše historii.
-Když u nabíjení zapíšeš údaj z elektroměru (měřák v zásuvce), použije se místo výpočtu a aplikace z měření
-spočítá skutečný koeficient (Přehled → Kalibrace, Nastavení → „použít naměřený“).
+**Výkon, který auto ukazuje při nabíjení, je odběr ze zásuvky** – ztráty v něm už jsou. Ověřeno dvakrát:
 
-Proč ne 1,12: měření přímo na Kona Electric 64 kWh (Mašek, Závodník: *Účinnost a rychlost nabíjení elektromobilů*,
-Perner's Contacts 2023, Univerzita Pardubice) vyšlo na průměrnou účinnost AC nabíjení **85 % → koeficient ≈ 1,18**.
-Při pomalém nabíjení 3,5 kW tvoří větší podíl stálá spotřeba elektroniky auta, v zimě navíc ohřev baterie. Odhady času
-přímo z palubní desky (např. 21 → 90 % za 15 h 50 min při 3,5 kW) odpovídají koeficientu kolem 1,25.
+1. Měření přímo na Kona Electric 64 kWh (Mašek, Závodník: *Účinnost a rychlost nabíjení elektromobilů*, Perner's Contacts 2023)
+   počítá účinnost jako energii z baterie ÷ energii dodanou do vozidla → AC průměrně 85 %. U Kony 2024 ukazovala palubní deska
+   11,3–11,4 kW (stanice 3 × 240 V × 16 A), zatímco do baterie šlo podle OBD 10,35–10,55 kW.
+2. Tvoje fotky: auto při 3,5 kW samo počítá, že do baterie jde jen ~2,75 kW (21 → 90 % = 44,2 kWh za 15 h 50 min = 55,4 kWh ze zásuvky).
+   Kdyby 3,5 kW šlo do baterie, trvalo by to 12,6 h.
+
+Doba nabíjení: od fotky startu do fotky konce; při „Dobito“ a automatickém uzavření do odhadovaného dobití (start + „Do dobití zbývá“).
+Když baterie skončila na limitu, počítá se nejvýš doba do dobití (auto pak už stojí). Když doba × výkon nesedí s nabitými %
+(vyjde méně než do baterie, nebo ztráty přes 60 %), aplikace na to upozorní a použije odhad nabito % × 64 kWh × koeficient
+(zima 1,25 / léto 1,18). Stejný odhad se použije, když chybí čas nebo výkon. Údaj z elektroměru má vždy přednost.
+
+Import ze staré tabulky: kWh z tabulky (hodiny × výkon) = ze sítě, do baterie se jen odhadne ÷ koeficient.
 
 ## Čtení fotek – co jsme testovali
 

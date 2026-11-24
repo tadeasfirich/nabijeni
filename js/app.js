@@ -5,6 +5,7 @@
 import { h, mount, mark, toast, modal, ask, confirmDialog, formDialog, fmt, downloadBlob, uid } from './ui.js';
 import * as D from './data.js';
 import { parseTableText, normalizeImport, findDuplicate, importSession, needsCoef, importCoef } from './model.js';
+import { METHOD_LABEL } from './model.js';
 import { calc, sumUp, calibration, check, coefFor, seasonFor, estimatedEnd, overdue, isRunning, monthKey, monthRange, inRange, SEASON_LABEL, round, DEFAULTS } from './model.js';
 import { preparePhoto } from './photo.js';
 import { readPhoto, readTable, readerReady, readerName } from './reader.js';
@@ -251,7 +252,7 @@ function runningCard(run, s) {
   return h('section', { class: 'box dark run' },
     h('h4', null, 'Nabíjí se'),
     h('p', { class: 'run-big' }, `${run.start.soc} %`, h('span', { class: 'arrow' }), `${target} %`),
-    h('p', { class: 'run-meta' }, `Od ${fmt.short(run.start.t)} · ${SEASON_LABEL[run.season]} × ${nf(run.coef)}${run.start.kw ? ` · ${nf(run.start.kw, 1)} kW` : ''}`),
+    h('p', { class: 'run-meta' }, `Od ${fmt.short(run.start.t)}${(run.start.kw ?? run.kw) ? ` · ${nf(run.start.kw ?? run.kw, 1)} kW ze zásuvky` : ''}`),
     estLine,
     h('div', { class: 'btn-col' },
       h('button', { class: 'btn primary xl on-dark', onclick: () => finishAtTarget(run) }, `Dobito – ${target} %`),
@@ -416,7 +417,8 @@ async function viewDraft() {
         h('h4', null, 'Výpočet'),
         h('p', { class: 'calc-big' }, h('b', null, `${nf(c.grid)} kWh`), h('span', null, ` · ${kc(c.cost)}`)),
         h('p', { class: 'small muted' }, calcLine(preview)),
-        h('p', { class: 'small muted' }, `Nabíjelo se ${c.hours !== null ? duration(c.hours * 60) : '?'}${c.timeKwh ? ` · podle času a výkonu by to bylo ${nf(c.timeKwh)} kWh` : ''}.`),
+        h('p', { class: 'small muted' }, `Do baterie ${nf(c.battery)} kWh (${c.dSoc} %)${c.ratio ? ` · ztráty ${nf(c.ratio)}×` : ''}.`),
+        c.warn ? h('p', { class: 'warn-line' }, mark('bad'), c.warn) : null,
       ]);
     }
     saveBtn.disabled = res.errors.length > 0;
@@ -494,7 +496,7 @@ async function viewDraft() {
     h('div', { class: 'page-head' },
       h('p', { class: 'eyebrow' }, isStart ? 'Začátek nabíjení' : 'Konec nabíjení'),
       h('h1', { class: 'title' }, isStart ? 'Kolik má baterie teď?' : 'Kolik se nabilo?'),
-      !isStart && run ? h('p', { class: 'sub' }, `Start ${fmt.short(run.start.t)} na ${run.start.soc} % · ${SEASON_LABEL[run.season]} × ${nf(run.coef)}`) : null),
+      !isStart && run ? h('p', { class: 'sub' }, `Start ${fmt.short(run.start.t)} na ${run.start.soc} %${(run.start.kw ?? run.kw) ? ` · ${nf(run.start.kw ?? run.kw, 1)} kW` : ''}`) : null),
     h('form', { class: 'draft', onsubmit: save },
       photoEl,
       statusBox,
@@ -506,7 +508,7 @@ async function viewDraft() {
       isStart ? h('label', { class: 'field' }, h('span', null, 'Výkon kW', tag('kw')), f.kw) : null,
       h('label', { class: 'field' }, h('span', null, 'Tachometr km', tag('odo')), f.odo),
       h('label', { class: 'field' }, h('span', null, 'Čas', d.fromExif ? h('em', { class: 'from-photo' }, 'z fotky') : null), f.t),
-      isStart ? h('div', { class: 'field' }, h('span', { class: 'muted' }, 'Koeficient ztrát'), seasonSeg) : null,
+      isStart ? h('div', { class: 'field' }, h('span', { class: 'muted' }, 'Koeficient (jen pro odhad, když chybí čas)'), seasonSeg) : null,
       h('label', { class: 'field' }, h('span', null, 'Poznámka'), f.note),
       calcBox,
       msgBox,
@@ -545,8 +547,8 @@ async function viewDetail(id) {
   const rowsTbl = c.imported ? [
     ['Datum', fmt.date(x.start.t)],
     ['Doba', `${nf(c.hours, 2)} h`],
-    ['Podle času', `${nf(x.importKwh, 3)} kWh (hodiny × výkon)`],
-    ['Koeficient', c.measured ? `${nf(c.realCoef, 3)} (z elektroměru)` : `${SEASON_LABEL[x.season] || ''} × ${nf(x.coef)}`],
+    ['Ze sítě', `${nf(x.importKwh, 3)} kWh (hodiny × výkon)`],
+    ['Do baterie (odhad)', `${nf(c.battery)} kWh = ze sítě ÷ ${nf(x.coef)}`],
     ['Cena', `${nf(x.price)} Kč/kWh`],
     ['Původ', 'import ze staré tabulky'],
     x.note && x.note !== 'import z tabulky' ? ['Poznámka', x.note] : null,
@@ -554,11 +556,13 @@ async function viewDetail(id) {
     ['Začátek', `${fmt.dt(x.start.t)} · ${x.start.soc} %`],
     x.start.remainMin != null ? ['Do dobití zbývalo', duration(x.start.remainMin)] : null,
     x.end ? ['Konec', `${fmt.dt(x.end.t)} · ${x.end.soc} % · ${x.end.mode === 'dobito' ? `dobito do ${x.end.soc} %` : MODE_LABEL[x.end.mode] || ''}`] : ['Konec', 'nabíjí se'],
-    c.hours !== null ? ['Doba', duration(c.hours * 60)] : null,
+    c.chargeHours !== null ? ['Doba nabíjení', `${duration(c.chargeHours * 60)}${c.hours !== null && c.chargeHours < c.hours - 0.02 ? ' (do dobití, pak už auto stálo)' : ''}`] : null,
+    c.kw ? ['Výkon', `${nf(c.kw, 1)} kW (odběr ze zásuvky)`] : null,
     ['Tachometr', x.start.odo ? `${x.start.odo.toLocaleString('cs-CZ')} km` : '–'],
-    ['Koeficient', c.measured ? `${nf(c.realCoef, 3)} (z elektroměru)` : `${SEASON_LABEL[x.season]} × ${nf(x.coef)}`],
+    ['Výpočet', METHOD_LABEL[c.method] || '–'],
+    c.ratio ? ['Ztráty', `ze sítě ÷ do baterie = ${nf(c.ratio)}×`] : null,
     ['Cena', `${nf(x.price)} Kč/kWh`],
-    c.timeKwh ? ['Kontrola podle času', `${nf(c.hours)} h × ${nf(x.kw, 1)} kW = ${nf(c.timeKwh)} kWh`] : null,
+    c.method === 'time' && c.socKwh ? ['Kontrola odhadem', `${nf(c.battery)} kWh × ${nf(x.coef)} = ${nf(c.socKwh)} kWh`] : null,
     x.note ? ['Poznámka', x.note] : null,
   ].filter(Boolean);
 
@@ -573,6 +577,7 @@ async function viewDetail(id) {
       kpi(nf(c.cost), 'Kč'),
       kpi(`${c.dSoc} %`, `nabito · ${nf(c.battery)} kWh`)),
     x.status === 'done' ? h('p', { class: 'small muted calc-line' }, calcLine(x)) : null,
+    c.warn ? h('p', { class: 'warn-line' }, mark('bad'), c.warn) : null,
     h('table', { class: 'kv' }, h('tbody', null, rowsTbl.map(([k, v]) => h('tr', null, h('th', null, k), h('td', null, v))))),
     photos.length ? h('div', { class: 'photos' }, photos) : null,
     x.status === 'done' ? h('section', { class: 'box dashed meter' },
@@ -604,8 +609,8 @@ async function editImported(x) {
   const r = await formDialog('Upravit importované nabíjení', [
     { name: 'day', label: 'Datum', type: 'date', value: isoDay(new Date(x.start.t)), required: true },
     { name: 'hours', label: 'Doba (h)', inputmode: 'decimal', value: nf(x.hours, 2), required: true },
-    { name: 'kwh', label: 'Spotřeba podle času kWh (do baterie)', inputmode: 'decimal', value: nf(x.importKwh, 3), required: true },
-    { name: 'coef', label: 'Koeficient ztrát', inputmode: 'decimal', value: nf(x.coef), required: true },
+    { name: 'kwh', label: 'Ze sítě kWh (hodiny × výkon)', inputmode: 'decimal', value: nf(x.importKwh, 3), required: true },
+    { name: 'coef', label: 'Koeficient (pro odhad do baterie)', inputmode: 'decimal', value: nf(x.coef), required: true },
     { name: 'price', label: 'Cena Kč/kWh', inputmode: 'decimal', value: nf(x.price), required: true },
     { name: 'note', label: 'Poznámka', value: x.note || '' },
   ], { ok: 'Uložit změny' });
@@ -624,6 +629,7 @@ async function editSession(x) {
     { name: 'startT', label: 'Začátek', type: 'datetime-local', value: toLocalInput(x.start.t), required: true },
     { name: 'startSoc', label: 'Baterie na začátku %', inputmode: 'numeric', value: String(x.start.soc ?? ''), required: true },
     { name: 'remain', label: 'Do dobití zbývalo (minut)', inputmode: 'numeric', value: x.start.remainMin != null ? String(x.start.remainMin) : '' },
+    { name: 'kw', label: 'Výkon kW (z palubní desky)', inputmode: 'decimal', value: (x.start.kw ?? x.kw) != null ? nf(x.start.kw ?? x.kw, 1) : '' },
     { name: 'odo', label: 'Tachometr km', inputmode: 'numeric', value: x.start.odo != null ? String(x.start.odo) : '' },
   ];
   if (x.end) fields.push(
@@ -631,7 +637,7 @@ async function editSession(x) {
     { name: 'endSoc', label: 'Baterie na konci %', inputmode: 'numeric', value: String(x.end.soc ?? ''), required: true },
   );
   fields.push(
-    { name: 'coef', label: 'Koeficient ztrát', inputmode: 'decimal', value: nf(x.coef), required: true },
+    { name: 'coef', label: 'Koeficient (jen pro odhad, když chybí čas/výkon)', inputmode: 'decimal', value: nf(x.coef), required: true },
     { name: 'price', label: 'Cena Kč/kWh', inputmode: 'decimal', value: nf(x.price), required: true },
     { name: 'note', label: 'Poznámka', value: x.note || '' },
   );
@@ -643,6 +649,7 @@ async function editSession(x) {
   next.start.soc = Math.round(n('startSoc'));
   next.start.remainMin = n('remain');
   next.start.odo = n('odo');
+  if (n('kw') !== null) { next.start.kw = n('kw'); next.kw = n('kw'); }
   if (x.end) {
     next.end.t = fromLocalInput(r.endT) || x.end.t;
     next.end.soc = Math.round(n('endSoc'));
@@ -878,13 +885,13 @@ async function viewSettings() {
       numField('Obvyklý výkon', 'kw', { unit: 'kW', d: 1, min: 1, max: 22 })),
 
     h('section', { class: 'section' },
-      h('div', { class: 'section-head' }, h('h2', null, 'Koeficient ztrát')),
-      h('p', { class: 'small' }, 'Část elektřiny ze zásuvky se při nabíjení ztratí (nabíječka v autě, elektronika, v zimě ohřev baterie). Proto: ze sítě = nabito % × kapacita × koeficient.'),
+      h('div', { class: 'section-head' }, h('h2', null, 'Jak se počítá')),
+      h('p', { class: 'small' }, h('b', null, 'Ze sítě = doba nabíjení × výkon z palubní desky. '), 'Výkon, který auto ukazuje (3,5 kW), je odběr ze zásuvky, ne výkon do baterie. Do baterie = nabito % × kapacita. Koeficient níže se použije jen na odhad: když chybí čas nebo výkon, a na odhad „do baterie“ u importu.'),
       h('div', { class: 'grid2' },
         numField('Léto', 'coefSummer', { d: 2, min: 1, max: 2 }),
         numField('Zima', 'coefWinter', { d: 2, min: 1, max: 2 })),
       h('div', { class: 'field' }, h('span', { class: 'muted' }, 'Zimní měsíce'), monthsBox),
-      h('p', { class: 'hint' }, 'Měření přímo na Kona Electric 64 kWh (Univerzita Pardubice, 2023) vyšlo na průměrnou účinnost AC nabíjení 85 % = koeficient ≈ 1,18. Při pomalém 3,5 kW nabíjení a v zimě bývají ztráty vyšší. Nejpřesnější je pár nabíjení změřit měřákem v zásuvce a zapsat do detailu – aplikace spočítá skutečný koeficient.'),
+      h('p', { class: 'hint' }, 'Ověřeno dvakrát: (1) měření Kony 64 kWh (Univerzita Pardubice, 2023) počítá účinnost z energie dodané do auta – 85 %; u Kony 2024 ukazovala palubní deska 11,3–11,4 kW, zatímco do baterie šlo 10,35–10,55 kW. (2) Tvoje fotky: při 3,5 kW auto počítá s tím, že do baterie jde jen asi 2,75 kW (např. 21 → 90 % za 15 h 50 min). Takže 3,5 kW je odběr ze zásuvky a ztráty jsou v něm už obsažené (u tebe kolem 1,25×).'),
       (cal.zima || cal.leto) ? h('div', { class: 'btn-row' }, ['zima', 'leto'].map((k) => cal[k] ? h('button', {
         class: 'btn small', onclick: async () => { await D.saveSettings({ [k === 'zima' ? 'coefWinter' : 'coefSummer']: round(cal[k].coef, 2) }); toast('Koeficient upraven.', { kind: 'ok' }); render(); },
       }, `${cap(SEASON_LABEL[k])}: použít naměřený ${nf(cal[k].coef, 2)}`) : null)) : null),
@@ -1025,11 +1032,10 @@ async function viewImport() {
   function draw() {
     if (!imp.rows.length) { mount(preview); return; }
     const chosen = imp.rows.filter((r) => !imp.skip.has(r.day));
-    const k = (r) => importCoef(r.coef, new Date(r.day + 'T18:00:00'), s).coef;
-    const sumK = chosen.reduce((a, r) => a + r.kwh * k(r), 0), sumC = chosen.reduce((a, r) => a + round(r.kwh * k(r), 2) * r.price, 0);
+    const sumK = chosen.reduce((a, r) => a + r.kwh, 0), sumC = chosen.reduce((a, r) => a + r.kwh * r.price, 0);
     mount(preview,
       h('div', { class: 'table-wrap' }, h('table', null,
-        h('thead', null, h('tr', null, h('th', null, ''), h('th', null, 'Datum'), h('th', { class: 'n' }, 'kWh'), h('th', { class: 'n' }, 'Koef.'), h('th', { class: 'n' }, 'Ze sítě'), h('th', { class: 'n' }, 'Kč'))),
+        h('thead', null, h('tr', null, h('th', null, ''), h('th', null, 'Datum'), h('th', { class: 'n' }, 'Hodin'), h('th', { class: 'n' }, 'Ze sítě'), h('th', { class: 'n' }, 'Kč'))),
         h('tbody', null, imp.rows.map((r) => {
           const dup = findDuplicate(r, existing);
           const cb = h('input', { type: 'checkbox', checked: !imp.skip.has(r.day), 'aria-label': `Importovat ${r.day}` });
@@ -1037,12 +1043,11 @@ async function viewImport() {
           return h('tr', { class: imp.skip.has(r.day) ? 'off' : '' },
             h('td', null, cb),
             h('td', null, fmt.date(r.day + 'T12:00:00'), dup ? h('small', { class: 'dup' }, `už v aplikaci (${fmt.short(dup.start.t)})`) : null),
+            h('td', { class: 'n' }, nf(r.hours, 2)),
             h('td', { class: 'n' }, nf(r.kwh, 2)),
-            h('td', { class: 'n' }, nf(k(r), 2)),
-            h('td', { class: 'n' }, nf(r.kwh * k(r), 2)),
-            h('td', { class: 'n' }, nf(round(r.kwh * k(r), 2) * r.price, 2)));
+            h('td', { class: 'n' }, nf(r.kwh * r.price, 2)));
         })))),
-      h('p', { class: 'small muted' }, `kWh z tabulky (hodiny × výkon) se berou jako do baterie a násobí koeficientem podle data (zima ${nf(s.coefWinter)}, léto ${nf(s.coefSummer)}). Cena ${[...new Set(imp.rows.map((r) => nf(r.price)))].join(' / ')} Kč/kWh (z tabulky, jinak z pole níže). Řádky, které už v aplikaci jsou (stejný den), jsou odškrtnuté.`),
+      h('p', { class: 'small muted' }, `kWh z tabulky (hodiny × výkon) jsou spotřeba ze sítě – výkon na palubní desce je odběr ze zásuvky. Do baterie se odhadne ÷ koeficient (zima ${nf(s.coefWinter)}, léto ${nf(s.coefSummer)}). Cena ${[...new Set(imp.rows.map((r) => nf(r.price)))].join(' / ')} Kč/kWh (z tabulky, jinak z pole níže). Řádky, které už v aplikaci jsou (stejný den), jsou odškrtnuté.`),
       h('button', {
         class: 'btn primary xl wide', disabled: !chosen.length,
         onclick: async () => {

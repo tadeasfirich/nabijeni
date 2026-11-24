@@ -2,11 +2,12 @@
 
 | Rozhodnutí | Proč | Jak změnit |
 |---|---|---|
-| **Spotřeba podle % baterie × kapacita × koeficient**, ne podle hodin × výkon | Procenta jsou na fotce vždy a nezáleží na tom, jestli nabíječka jela celou dobu na 3,5 kW nebo kdy přesně auto dobilo. Čas × výkon aplikace ukazuje v detailu jako kontrolu. | `calc()` v `js/model.js` |
-| **Koeficient léto 1,18 / zima 1,25** místo 1,12 | Měření na Kona 64 kWh: účinnost AC nabíjení 85 % (= 1,18); pomalé 3,5 kW a zima ztráty zvyšují; odhady času na palubní desce odpovídají ~1,25. | Nastavení → Koeficient ztrát |
+| **Ze sítě = doba nabíjení × výkon z palubní desky** (do baterie = nabito % × 64 kWh) | Výkon na palubní desce je odběr ze zásuvky – ověřeno měřením Kony a odhady času v autě (při 3,5 kW jde do baterie ~2,75 kW). Ztráty jsou tedy v čísle už obsažené. Původně jsem počítal % × koeficient; dává podobný výsledek (1,25 vs. skutečných ~1,26–1,28), ale doba × výkon je přímý údaj. | `calc()` v `js/model.js` |
+| **Koeficient (zima 1,25 / léto 1,18) jen jako záloha** | Použije se, když chybí čas nebo výkon, když doba × výkon nesedí s % baterie, a na odhad „do baterie“ u importu. | Nastavení → Jak se počítá |
+| **Doba nabíjení končí nejpozději dobitím** | Když baterie skončila na limitu a konec zapíšeš později, auto už stálo – počítá se jen do odhadovaného dobití. | `calc()` |
 | **Zima = listopad až březen** podle data začátku | Jednoduché a předvídatelné; u každého startu jde přepnout ručně. | Nastavení → Zimní měsíce |
 | **Koeficient a cena se ukládají ke každému nabíjení** | Změna ceny nebo koeficientu nepřepíše už vyúčtované měsíce. Starší záznam jde opravit v detailu → Upravit. | – |
-| **Elektroměr** (nepovinné kWh u nabíjení) přebije výpočet | Nejpřesnější údaj; z více měření aplikace spočítá skutečný koeficient a nabídne ho použít. | detail nabíjení |
+| **Elektroměr** (nepovinné kWh u nabíjení) přebije výpočet | Nejpřesnější údaj. | detail nabíjení |
 | **„Dobito“ bez fotky** – konec = limit (90 %), čas = odhad z „Do dobití zbývá“ (nebo teď, pokud je dřív) | Nejčastější případ na jedno ťuknutí. Když se nabilo jinak, je tam „zadat ručně“. | `finishAtTarget()` v `js/app.js` |
 | **Čtení fotek přes AI** (Gemini zdarma / Claude), ne offline OCR | Offline OCR na tvých fotkách přečetl % baterie správně jen u 2–3 ze 6. Hodnoty z AI se vždy potvrzují a kontrolují (rozsahy, konec ≥ start, tachometr vs. minule). | `js/reader.js` |
 | **Klíč k AI a heslo zálohy jen v telefonu** | Nezálohují se na Disk ani do souboru. | – |
