@@ -4,7 +4,7 @@
 
 import { h, mount, mark, toast, modal, ask, confirmDialog, formDialog, fmt, downloadBlob, uid } from './ui.js';
 import * as D from './data.js';
-import { parseTableText, normalizeImport, findDuplicate, importSession } from './model.js';
+import { parseTableText, normalizeImport, findDuplicate, importSession, needsCoef, importCoef } from './model.js';
 import { calc, sumUp, calibration, check, coefFor, seasonFor, estimatedEnd, overdue, isRunning, monthKey, monthRange, inRange, SEASON_LABEL, round, DEFAULTS } from './model.js';
 import { preparePhoto } from './photo.js';
 import { readPhoto, readTable, readerReady, readerName } from './reader.js';
@@ -143,7 +143,21 @@ async function autoFinish() {
   } finally { autoBusy = false; }
 }
 
+let migrated = false;
+async function migrateImports() {
+  if (migrated) return;
+  migrated = true;
+  const s = await D.getSettings();
+  const todo = (await D.listSessions()).filter(needsCoef);
+  for (const x of todo) { Object.assign(x, importCoef(null, x.start.t, s)); await D.saveSession(x, { silent: true }); }
+  if (todo.length) {
+    toast(`Importovaná nabíjení (${todo.length}) přepočítána s koeficientem.`, { kind: 'ok', timeout: 6000 });
+    if (syncConfigured(s)) markDirty();
+  }
+}
+
 async function render() {
+  await migrateImports();
   await autoFinish();
   const hash = location.hash || '#/';
   let found = ROUTES.find(([re]) => re.test(hash));
@@ -531,9 +545,10 @@ async function viewDetail(id) {
   const rowsTbl = c.imported ? [
     ['Datum', fmt.date(x.start.t)],
     ['Doba', `${nf(c.hours, 2)} h`],
-    ['Spotřeba', `${nf(x.importKwh, 3)} kWh`],
+    ['Podle času', `${nf(x.importKwh, 3)} kWh (hodiny × výkon)`],
+    ['Koeficient', c.measured ? `${nf(c.realCoef, 3)} (z elektroměru)` : `${SEASON_LABEL[x.season] || ''} × ${nf(x.coef)}`],
     ['Cena', `${nf(x.price)} Kč/kWh`],
-    ['Původ', 'import ze staré tabulky (hodiny × výkon)'],
+    ['Původ', 'import ze staré tabulky'],
     x.note && x.note !== 'import z tabulky' ? ['Poznámka', x.note] : null,
   ].filter(Boolean) : [
     ['Začátek', `${fmt.dt(x.start.t)} · ${x.start.soc} %`],
@@ -553,14 +568,14 @@ async function viewDetail(id) {
       h('p', { class: 'eyebrow' }, x.status === 'running' ? 'Probíhá' : 'Nabíjení'),
       h('h1', { class: 'title' }, c.imported ? `${fmt.date(x.start.t)} · import` : `${fmt.date(x.start.t)} · ${x.start.soc} → ${x.end?.soc ?? '…'} %`)),
     x.status === 'running' ? runningCard(x, s) : c.imported ? h('div', { class: 'kpis' },
-      kpi(nf(c.grid), 'kWh ze sítě'), kpi(nf(c.cost), 'Kč'), kpi(nf(c.hours, 2), 'hodin')) : h('div', { class: 'kpis' },
+      kpi(nf(c.grid), 'kWh ze sítě'), kpi(nf(c.cost), 'Kč'), kpi(nf(c.battery), 'kWh do baterie')) : h('div', { class: 'kpis' },
       kpi(nf(c.grid), c.measured ? 'kWh ze sítě (elektroměr)' : 'kWh ze sítě'),
       kpi(nf(c.cost), 'Kč'),
       kpi(`${c.dSoc} %`, `nabito · ${nf(c.battery)} kWh`)),
     x.status === 'done' ? h('p', { class: 'small muted calc-line' }, calcLine(x)) : null,
     h('table', { class: 'kv' }, h('tbody', null, rowsTbl.map(([k, v]) => h('tr', null, h('th', null, k), h('td', null, v))))),
     photos.length ? h('div', { class: 'photos' }, photos) : null,
-    x.status === 'done' && !c.imported ? h('section', { class: 'box dashed meter' },
+    x.status === 'done' ? h('section', { class: 'box dashed meter' },
       h('h4', null, 'Elektroměr (nepovinné)'),
       h('p', { class: 'small muted' }, 'Když máš na zásuvce měřák spotřeby, zapiš skutečné kWh. Použijí se místo výpočtu a z několika měření spočítám skutečný koeficient.'),
       h('div', { class: 'manual' }, meterInp, h('button', {
@@ -589,14 +604,15 @@ async function editImported(x) {
   const r = await formDialog('Upravit importované nabíjení', [
     { name: 'day', label: 'Datum', type: 'date', value: isoDay(new Date(x.start.t)), required: true },
     { name: 'hours', label: 'Doba (h)', inputmode: 'decimal', value: nf(x.hours, 2), required: true },
-    { name: 'kwh', label: 'Spotřeba kWh', inputmode: 'decimal', value: nf(x.importKwh, 3), required: true },
+    { name: 'kwh', label: 'Spotřeba podle času kWh (do baterie)', inputmode: 'decimal', value: nf(x.importKwh, 3), required: true },
+    { name: 'coef', label: 'Koeficient ztrát', inputmode: 'decimal', value: nf(x.coef), required: true },
     { name: 'price', label: 'Cena Kč/kWh', inputmode: 'decimal', value: nf(x.price), required: true },
     { name: 'note', label: 'Poznámka', value: x.note || '' },
   ], { ok: 'Uložit změny' });
   if (!r) return;
-  const hours = parseNum(r.hours), kwh = parseNum(r.kwh), price = parseNum(r.price);
-  if (!(hours >= 0) || !(kwh > 0) || !(price > 0)) { await ask('Nelze uložit', 'Doba, kWh i cena musí být kladná čísla.', [{ label: 'Rozumím', value: true, kind: 'primary' }]); return; }
-  const fresh = importSession({ day: r.day, hours, kwh, price, kw: hours ? round(kwh / hours, 2) : x.kw });
+  const hours = parseNum(r.hours), kwh = parseNum(r.kwh), price = parseNum(r.price), coef = parseNum(r.coef);
+  if (!(hours >= 0) || !(kwh > 0) || !(price > 0) || !(coef >= 1 && coef <= 2)) { await ask('Nelze uložit', 'Doba, kWh a cena musí být kladná čísla, koeficient mezi 1 a 2.', [{ label: 'Rozumím', value: true, kind: 'primary' }]); return; }
+  const fresh = importSession({ day: r.day, hours, kwh, price, coef, kw: hours ? round(kwh / hours, 2) : x.kw }, await D.getSettings());
   await D.saveSession({ ...x, ...fresh, id: x.id, createdAt: x.createdAt, note: r.note });
   toast('Změny uloženy.', { kind: 'ok' });
   render();
@@ -1009,10 +1025,11 @@ async function viewImport() {
   function draw() {
     if (!imp.rows.length) { mount(preview); return; }
     const chosen = imp.rows.filter((r) => !imp.skip.has(r.day));
-    const sumK = chosen.reduce((a, r) => a + r.kwh, 0), sumC = chosen.reduce((a, r) => a + r.kwh * r.price, 0);
+    const k = (r) => importCoef(r.coef, new Date(r.day + 'T18:00:00'), s).coef;
+    const sumK = chosen.reduce((a, r) => a + r.kwh * k(r), 0), sumC = chosen.reduce((a, r) => a + round(r.kwh * k(r), 2) * r.price, 0);
     mount(preview,
       h('div', { class: 'table-wrap' }, h('table', null,
-        h('thead', null, h('tr', null, h('th', null, ''), h('th', null, 'Datum'), h('th', { class: 'n' }, 'Hodin'), h('th', { class: 'n' }, 'kWh'), h('th', { class: 'n' }, 'Kč'))),
+        h('thead', null, h('tr', null, h('th', null, ''), h('th', null, 'Datum'), h('th', { class: 'n' }, 'kWh'), h('th', { class: 'n' }, 'Koef.'), h('th', { class: 'n' }, 'Ze sítě'), h('th', { class: 'n' }, 'Kč'))),
         h('tbody', null, imp.rows.map((r) => {
           const dup = findDuplicate(r, existing);
           const cb = h('input', { type: 'checkbox', checked: !imp.skip.has(r.day), 'aria-label': `Importovat ${r.day}` });
@@ -1020,15 +1037,16 @@ async function viewImport() {
           return h('tr', { class: imp.skip.has(r.day) ? 'off' : '' },
             h('td', null, cb),
             h('td', null, fmt.date(r.day + 'T12:00:00'), dup ? h('small', { class: 'dup' }, `už v aplikaci (${fmt.short(dup.start.t)})`) : null),
-            h('td', { class: 'n' }, nf(r.hours, 2)),
             h('td', { class: 'n' }, nf(r.kwh, 2)),
-            h('td', { class: 'n' }, nf(r.kwh * r.price, 2)));
+            h('td', { class: 'n' }, nf(k(r), 2)),
+            h('td', { class: 'n' }, nf(r.kwh * k(r), 2)),
+            h('td', { class: 'n' }, nf(round(r.kwh * k(r), 2) * r.price, 2)));
         })))),
-      h('p', { class: 'small muted' }, `Cena ${[...new Set(imp.rows.map((r) => nf(r.price)))].join(' / ')} Kč/kWh (z tabulky, jinak z pole níže). Řádky, které už v aplikaci jsou (stejný den), jsou odškrtnuté.`),
+      h('p', { class: 'small muted' }, `kWh z tabulky (hodiny × výkon) se berou jako do baterie a násobí koeficientem podle data (zima ${nf(s.coefWinter)}, léto ${nf(s.coefSummer)}). Cena ${[...new Set(imp.rows.map((r) => nf(r.price)))].join(' / ')} Kč/kWh (z tabulky, jinak z pole níže). Řádky, které už v aplikaci jsou (stejný den), jsou odškrtnuté.`),
       h('button', {
         class: 'btn primary xl wide', disabled: !chosen.length,
         onclick: async () => {
-          for (const r of chosen) await D.saveSession(importSession(r), { silent: true });
+          for (const r of chosen) await D.saveSession(importSession(r, s), { silent: true });
           if (chosen.length) await D.saveSession(await D.getSession((await D.listSessions())[0].id));
           toast(`Importováno ${chosen.length} ${fmt.plural(chosen.length, 'nabíjení', 'nabíjení', 'nabíjení')} · ${nf(sumK)} kWh · ${kc(sumC)}`, { kind: 'ok', timeout: 6000 });
           imp.text = ''; imp.rows = []; imp.skip = new Set();

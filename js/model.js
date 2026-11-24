@@ -65,12 +65,21 @@ export function calc(sess) {
   const out = { dSoc: null, battery: null, grid: null, cost: null, hours: null, timeKwh: null, coef: num(sess?.coef), measured: false, realCoef: null };
   if (!st) return out;
   // import ze staré tabulky: kWh jsou dané (hodiny × výkon), procenta baterie nejsou
+  // kWh z tabulky = údaj podle času (hodiny × výkon) → do baterie; ze sítě = × koeficient
   const imp = num(sess?.importKwh);
   if (imp !== null) {
     out.imported = true;
-    out.grid = round(imp, 2);
-    out.cost = round(imp * (num(sess.price) ?? 0), 2);
+    out.battery = round(imp, 2);
     out.hours = num(sess.hours);
+    const meter = num(sess.meterKwh);
+    if (meter !== null && meter > 0) {
+      out.grid = round(meter, 2);
+      out.measured = true;
+      out.realCoef = imp > 0 ? round(meter / imp, 3) : null;
+    } else {
+      out.grid = round(imp * (out.coef ?? 1), 2);
+    }
+    out.cost = round(out.grid * (num(sess.price) ?? 0), 2);
     return out;
   }
   if (en && num(en.soc) !== null && num(st.soc) !== null) {
@@ -251,7 +260,7 @@ export function normalizeImport(rows, { kw, price }) {
     if (kwh === null && hours !== null) kwh = hours * kw;
     if (hours === null && kwh !== null && kw) hours = kwh / kw;
     const p = r.cost !== null && kwh ? r.cost / kwh : price;
-    return { day: r.day, hours: round(hours, 2), kwh: round(kwh, 3), price: round(p, 2), kw: hours && kwh ? round(kwh / hours, 2) : kw };
+    return { day: r.day, hours: round(hours, 2), kwh: round(kwh, 3), price: round(p, 2), kw: hours && kwh ? round(kwh / hours, 2) : kw, coef: r.coef ?? null };
   }).filter((r) => r.kwh !== null && r.kwh > 0);
 }
 
@@ -261,7 +270,7 @@ export function findDuplicate(row, sessions) {
   return sessions.find((s) => !s.deleted && s.start?.t && localDay(s.start.t) === row.day) || null;
 }
 
-export function importSession(row) {
+export function importSession(row, settings) {
   const [y, m, d] = row.day.split('-').map(Number);
   const start = new Date(y, m - 1, d, 18, 0);
   const end = new Date(start.getTime() + (row.hours || 0) * 3600000);
@@ -270,6 +279,19 @@ export function importSession(row) {
     start: { t: start.toISOString(), soc: null },
     end: { t: end.toISOString(), soc: null, mode: 'import' },
     importKwh: row.kwh, hours: row.hours, kw: row.kw, price: row.price,
-    coef: null, season: null, capacity: DEFAULTS.capacity, note: 'import z tabulky',
+    capacity: DEFAULTS.capacity, note: 'import z tabulky',
+    ...importCoef(row.coef, start, settings),
   };
+}
+
+// Koeficient importu: uvedený v řádku, jinak podle data (zimní / letní z nastavení).
+export function importCoef(given, date, settings) {
+  const s = settings || DEFAULTS;
+  const season = seasonFor(date, s);
+  return { season, coef: given ?? coefFor(season, s) };
+}
+
+// Starší importy (bez koeficientu) → doplnit koeficient podle data.
+export function needsCoef(s) {
+  return s && !s.deleted && s.source === 'import' && (s.coef === null || s.coef === undefined);
 }
