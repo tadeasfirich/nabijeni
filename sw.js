@@ -2,7 +2,7 @@
 // Při každé nové verzi zvyš VERSION, ať si telefon stáhne nové soubory.
 // Vlastní soubory se nejdřív zkusí ze sítě (ať se hned projeví nová verze), při výpadku z mezipaměti.
 
-const VERSION = 'nabijeni-v3';
+const VERSION = 'nabijeni-v4';
 const FILES = [
   './', 'index.html', 'styles.css', 'manifest.webmanifest',
   'icons/icon.svg', 'icons/icon-192.png', 'icons/icon-512.png',

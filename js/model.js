@@ -64,6 +64,15 @@ export function calc(sess) {
   const en = sess?.end;
   const out = { dSoc: null, battery: null, grid: null, cost: null, hours: null, timeKwh: null, coef: num(sess?.coef), measured: false, realCoef: null };
   if (!st) return out;
+  // import ze staré tabulky: kWh jsou dané (hodiny × výkon), procenta baterie nejsou
+  const imp = num(sess?.importKwh);
+  if (imp !== null) {
+    out.imported = true;
+    out.grid = round(imp, 2);
+    out.cost = round(imp * (num(sess.price) ?? 0), 2);
+    out.hours = num(sess.hours);
+    return out;
+  }
   if (en && num(en.soc) !== null && num(st.soc) !== null) {
     out.dSoc = Math.max(0, num(en.soc) - num(st.soc));
     out.battery = round(out.dSoc / 100 * (num(sess.capacity) ?? DEFAULTS.capacity), 2);
@@ -90,7 +99,8 @@ export function sumUp(list) {
     const c = calc(s);
     if (c.grid === null) continue;
     t.count++;
-    t.battery += c.battery;
+    t.battery += c.battery || 0;
+    if (c.imported) t.imported = (t.imported || 0) + 1;
     t.grid += c.grid;
     t.cost += c.cost;
     t.hours += c.hours || 0;
@@ -191,4 +201,75 @@ export function mergeSessions(local, remote) {
     }
   }
   return { all: [...map.values()], changed };
+}
+
+// ---------------------------------------------------------------- import ze staré tabulky
+const p2 = (n) => String(n).padStart(2, '0');
+export function parseCz(v) {
+  if (v === null || v === undefined) return null;
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  const s = String(v).replace(/[\s\u00a0]/g, '').replace(/kč|kwh|kw|h$/gi, '').replace(',', '.');
+  if (!/^-?\d+(\.\d+)?$/.test(s)) return null;
+  return Number(s);
+}
+
+// „8.11“, „8. 11.“, „9.11.2026“, „2026-11-08“ → '2026-11-08'. Bez roku: letošní, pokud nevychází do budoucna.
+export function parseDay(raw, now = new Date()) {
+  const s = String(raw ?? '').trim();
+  let y = null, m, d, mm;
+  if ((mm = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/))) { y = +mm[1]; m = +mm[2]; d = +mm[3]; }
+  else if ((mm = s.match(/^(\d{1,2})\.\s*(\d{1,2})\.?(?:\s*(\d{4}))?\.?$/))) { d = +mm[1]; m = +mm[2]; y = mm[3] ? +mm[3] : null; }
+  else return null;
+  if (m < 1 || m > 12 || d < 1 || d > 31) return null;
+  if (!y) {
+    y = now.getFullYear();
+    if (new Date(y, m - 1, d).getTime() > now.getTime() + 86400000) y--;
+  }
+  const dt = new Date(y, m - 1, d);
+  if (dt.getMonth() !== m - 1) return null;
+  return `${y}-${p2(m)}-${p2(d)}`;
+}
+
+// Vložený text (zkopírované buňky z Google Tabulek/Excelu). Sloupce: datum, doba h, kWh, Kč – další se ignorují.
+export function parseTableText(text, now = new Date()) {
+  const rows = [];
+  for (const line of String(text || '').split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    const cells = line.includes('\t') ? line.split('\t') : line.includes(';') ? line.split(';') : line.trim().split(/\s{2,}|\s(?=\d)/);
+    const day = parseDay(cells[0], now);
+    if (!day) continue;
+    const nums = cells.slice(1).map(parseCz).filter((x) => x !== null);
+    rows.push({ day, hours: nums[0] ?? null, kwh: nums[1] ?? null, cost: nums[2] ?? null });
+  }
+  return rows;
+}
+
+// Doplní chybějící hodnoty: kWh = hodiny × výkon, cena za kWh = Kč ÷ kWh (jinak z nastavení).
+export function normalizeImport(rows, { kw, price }) {
+  return rows.map((r) => {
+    let hours = r.hours, kwh = r.kwh;
+    if (kwh === null && hours !== null) kwh = hours * kw;
+    if (hours === null && kwh !== null && kw) hours = kwh / kw;
+    const p = r.cost !== null && kwh ? r.cost / kwh : price;
+    return { day: r.day, hours: round(hours, 2), kwh: round(kwh, 3), price: round(p, 2), kw: hours && kwh ? round(kwh / hours, 2) : kw };
+  }).filter((r) => r.kwh !== null && r.kwh > 0);
+}
+
+const localDay = (iso) => { const d = new Date(iso); return `${d.getFullYear()}-${p2(d.getMonth() + 1)}-${p2(d.getDate())}`; };
+// Stejný den začátku = už je v aplikaci.
+export function findDuplicate(row, sessions) {
+  return sessions.find((s) => !s.deleted && s.start?.t && localDay(s.start.t) === row.day) || null;
+}
+
+export function importSession(row) {
+  const [y, m, d] = row.day.split('-').map(Number);
+  const start = new Date(y, m - 1, d, 18, 0);
+  const end = new Date(start.getTime() + (row.hours || 0) * 3600000);
+  return {
+    source: 'import', status: 'done', approxTime: true,
+    start: { t: start.toISOString(), soc: null },
+    end: { t: end.toISOString(), soc: null, mode: 'import' },
+    importKwh: row.kwh, hours: row.hours, kw: row.kw, price: row.price,
+    coef: null, season: null, capacity: DEFAULTS.capacity, note: 'import z tabulky',
+  };
 }

@@ -4,9 +4,10 @@
 
 import { h, mount, mark, toast, modal, ask, confirmDialog, formDialog, fmt, downloadBlob, uid } from './ui.js';
 import * as D from './data.js';
+import { parseTableText, normalizeImport, findDuplicate, importSession } from './model.js';
 import { calc, sumUp, calibration, check, coefFor, seasonFor, estimatedEnd, overdue, isRunning, monthKey, monthRange, inRange, SEASON_LABEL, round, DEFAULTS } from './model.js';
 import { preparePhoto } from './photo.js';
-import { readPhoto, readerReady, readerName } from './reader.js';
+import { readPhoto, readTable, readerReady, readerName } from './reader.js';
 import { syncNow, scheduleSync, markDirty, syncState, onSyncStatus, syncConfigured, testConnection, isBusy } from './sync.js';
 import { workbook, printReport, fileName, periodLabel, calcLine, nf, kc, MODE_LABEL } from './report.js';
 
@@ -116,6 +117,7 @@ const ROUTES = [
   [/^#\/n\/([\w-]+)$/, 'home', (m) => viewDetail(m[1])],
   [/^#\/prehled$/, 'prehled', () => viewOverview()],
   [/^#\/nastaveni$/, 'nastaveni', () => viewSettings()],
+  [/^#\/import$/, 'nastaveni', () => viewImport()],
 ];
 
 let autoBusy = false;
@@ -213,8 +215,8 @@ function sessRow(x) {
   return h('a', { class: 'row', href: `#/n/${x.id}` },
     mark(kind),
     h('span', { class: 'grow' },
-      h('b', null, `${fmt.date(x.start.t)} `, h('span', { class: 'muted' }, fmt.time(x.start.t))),
-      h('small', null, x.status === 'running' ? `${x.start.soc} % → nabíjí se` :
+      h('b', null, `${fmt.date(x.start.t)} `, x.approxTime ? null : h('span', { class: 'muted' }, fmt.time(x.start.t))),
+      h('small', null, x.status === 'running' ? `${x.start.soc} % → nabíjí se` : c.imported ? `import z tabulky · ${nf(c.hours, 2)} h` :
         `${x.start.soc} → ${x.end?.soc ?? '?'} %${x.end?.mode === 'drive' ? ' · dříve' : ''}${c.measured ? ' · elektroměr' : ''}`)),
     x.status === 'done' ? h('span', { class: 'row-num' }, h('b', null, `${nf(c.grid, 1)} kWh`), h('small', null, kc(c.cost))) : null,
     h('span', { class: 'chev' }));
@@ -526,7 +528,14 @@ async function viewDetail(id) {
     }
   }
   const meterInp = h('input', { type: 'text', inputmode: 'decimal', placeholder: 'kWh z elektroměru', value: x.meterKwh != null ? nf(x.meterKwh, 2) : '' });
-  const rowsTbl = [
+  const rowsTbl = c.imported ? [
+    ['Datum', fmt.date(x.start.t)],
+    ['Doba', `${nf(c.hours, 2)} h`],
+    ['Spotřeba', `${nf(x.importKwh, 3)} kWh`],
+    ['Cena', `${nf(x.price)} Kč/kWh`],
+    ['Původ', 'import ze staré tabulky (hodiny × výkon)'],
+    x.note && x.note !== 'import z tabulky' ? ['Poznámka', x.note] : null,
+  ].filter(Boolean) : [
     ['Začátek', `${fmt.dt(x.start.t)} · ${x.start.soc} %`],
     x.start.remainMin != null ? ['Do dobití zbývalo', duration(x.start.remainMin)] : null,
     x.end ? ['Konec', `${fmt.dt(x.end.t)} · ${x.end.soc} % · ${x.end.mode === 'dobito' ? `dobito do ${x.end.soc} %` : MODE_LABEL[x.end.mode] || ''}`] : ['Konec', 'nabíjí se'],
@@ -542,15 +551,16 @@ async function viewDetail(id) {
     h('a', { class: 'back', href: '#/' }, 'Zpět'),
     h('div', { class: 'page-head' },
       h('p', { class: 'eyebrow' }, x.status === 'running' ? 'Probíhá' : 'Nabíjení'),
-      h('h1', { class: 'title' }, `${fmt.date(x.start.t)} · ${x.start.soc} → ${x.end?.soc ?? '…'} %`)),
-    x.status === 'running' ? runningCard(x, s) : h('div', { class: 'kpis' },
+      h('h1', { class: 'title' }, c.imported ? `${fmt.date(x.start.t)} · import` : `${fmt.date(x.start.t)} · ${x.start.soc} → ${x.end?.soc ?? '…'} %`)),
+    x.status === 'running' ? runningCard(x, s) : c.imported ? h('div', { class: 'kpis' },
+      kpi(nf(c.grid), 'kWh ze sítě'), kpi(nf(c.cost), 'Kč'), kpi(nf(c.hours, 2), 'hodin')) : h('div', { class: 'kpis' },
       kpi(nf(c.grid), c.measured ? 'kWh ze sítě (elektroměr)' : 'kWh ze sítě'),
       kpi(nf(c.cost), 'Kč'),
       kpi(`${c.dSoc} %`, `nabito · ${nf(c.battery)} kWh`)),
     x.status === 'done' ? h('p', { class: 'small muted calc-line' }, calcLine(x)) : null,
     h('table', { class: 'kv' }, h('tbody', null, rowsTbl.map(([k, v]) => h('tr', null, h('th', null, k), h('td', null, v))))),
     photos.length ? h('div', { class: 'photos' }, photos) : null,
-    x.status === 'done' ? h('section', { class: 'box dashed meter' },
+    x.status === 'done' && !c.imported ? h('section', { class: 'box dashed meter' },
       h('h4', null, 'Elektroměr (nepovinné)'),
       h('p', { class: 'small muted' }, 'Když máš na zásuvce měřák spotřeby, zapiš skutečné kWh. Použijí se místo výpočtu a z několika měření spočítám skutečný koeficient.'),
       h('div', { class: 'manual' }, meterInp, h('button', {
@@ -567,7 +577,7 @@ async function viewDetail(id) {
     h('div', { class: 'btn-row actions' },
       h('button', { class: 'btn', onclick: () => editSession(x) }, 'Upravit'),
       h('button', { class: 'btn ghost', onclick: async () => {
-        if (!(await confirmDialog('Smazat nabíjení?', `${fmt.dt(x.start.t)} · ${x.start.soc} → ${x.end?.soc ?? '…'} %. Smaže se i ze zálohy.`, 'Smazat', 'Nechat'))) return;
+        if (!(await confirmDialog('Smazat nabíjení?', `${fmt.date(x.start.t)} · ${nf(c.grid)} kWh. Smaže se i ze zálohy.`, 'Smazat', 'Nechat'))) return;
         await D.deleteSession(x.id);
         toast('Smazáno.');
         location.hash = '#/';
@@ -575,7 +585,25 @@ async function viewDetail(id) {
   ];
 }
 
+async function editImported(x) {
+  const r = await formDialog('Upravit importované nabíjení', [
+    { name: 'day', label: 'Datum', type: 'date', value: isoDay(new Date(x.start.t)), required: true },
+    { name: 'hours', label: 'Doba (h)', inputmode: 'decimal', value: nf(x.hours, 2), required: true },
+    { name: 'kwh', label: 'Spotřeba kWh', inputmode: 'decimal', value: nf(x.importKwh, 3), required: true },
+    { name: 'price', label: 'Cena Kč/kWh', inputmode: 'decimal', value: nf(x.price), required: true },
+    { name: 'note', label: 'Poznámka', value: x.note || '' },
+  ], { ok: 'Uložit změny' });
+  if (!r) return;
+  const hours = parseNum(r.hours), kwh = parseNum(r.kwh), price = parseNum(r.price);
+  if (!(hours >= 0) || !(kwh > 0) || !(price > 0)) { await ask('Nelze uložit', 'Doba, kWh i cena musí být kladná čísla.', [{ label: 'Rozumím', value: true, kind: 'primary' }]); return; }
+  const fresh = importSession({ day: r.day, hours, kwh, price, kw: hours ? round(kwh / hours, 2) : x.kw });
+  await D.saveSession({ ...x, ...fresh, id: x.id, createdAt: x.createdAt, note: r.note });
+  toast('Změny uloženy.', { kind: 'ok' });
+  render();
+}
+
 async function editSession(x) {
+  if (x.source === 'import') return editImported(x);
   const fields = [
     { name: 'startT', label: 'Začátek', type: 'datetime-local', value: toLocalInput(x.start.t), required: true },
     { name: 'startSoc', label: 'Baterie na začátku %', inputmode: 'numeric', value: String(x.start.soc ?? ''), required: true },
@@ -678,8 +706,8 @@ async function viewOverview() {
       h('tbody', null, [...list].reverse().map((x) => {
         const c = calc(x);
         return h('tr', { class: 'click', onclick: () => { location.hash = `#/n/${x.id}`; } },
-          h('td', null, fmt.date(x.start.t), h('small', { class: 'muted' }, ` ${fmt.time(x.start.t)}`)),
-          h('td', null, `${x.start.soc} → ${x.end.soc} %`),
+          h('td', null, fmt.date(x.start.t), x.approxTime ? null : h('small', { class: 'muted' }, ` ${fmt.time(x.start.t)}`)),
+          h('td', null, calc(x).imported ? 'import' : `${x.start.soc} → ${x.end.soc} %`),
           h('td', { class: 'n' }, nf(c.grid)),
           h('td', { class: 'n' }, nf(c.cost)));
       })),
@@ -705,9 +733,11 @@ async function viewSettings() {
     el.addEventListener('change', async () => {
       const v = parseNum(el.value);
       if (v === null || v < min || v > max) { toast(`${label}: zadej číslo ${nf(min, 0)}–${nf(max, 0)}.`); el.value = nf(s[key], d); return; }
+      const old = s[key];
       await D.saveSettings({ [key]: v });
       s[key] = v;
       toast(`${label}: uloženo.`, { kind: 'ok' });
+      if (key === 'price' && old !== v) await applyPriceToOld(v);
     });
     return h('label', { class: 'field' }, h('span', null, label, unit ? h('em', null, ` (${unit})`) : null), el, hint ? h('small', { class: 'muted' }, hint) : null);
   };
@@ -868,6 +898,11 @@ async function viewSettings() {
         st.sheetUrl ? [' · ', h('a', { href: st.sheetUrl, target: '_blank', rel: 'noopener' }, 'Tabulka')] : null)),
 
     h('section', { class: 'section' },
+      h('div', { class: 'section-head' }, h('h2', null, 'Import starších nabíjení')),
+      h('p', { class: 'small' }, 'Z tabulky (datum, doba, kWh, Kč) – zkopírované řádky nebo snímek obrazovky.'),
+      h('a', { class: 'btn', href: '#/import' }, 'Importovat z tabulky')),
+
+    h('section', { class: 'section' },
       h('div', { class: 'section-head' }, h('h2', null, 'Data v telefonu')),
       h('p', { class: 'small' }, `${count} ${fmt.plural(count, 'nabíjení', 'nabíjení', 'nabíjení')} · ${info.photos} ${fmt.plural(info.photos, 'fotka', 'fotky', 'fotek')} (${nf(info.bytes / 1048576, 1)} MB).`),
       h('div', { class: 'btn-row' },
@@ -910,3 +945,113 @@ init().catch((e) => {
   console.error(e);
   mount(app, h('div', { class: 'content' }, h('h1', null, 'Aplikace se nespustila'), h('p', null, String(e.message || e))));
 });
+
+// ---------------------------------------------------------------- změna ceny u starších nabíjení
+async function applyPriceToOld(price) {
+  const all = (await D.listSessions()).filter((x) => Number(x.price) !== price);
+  if (!all.length) return;
+  const thisMonth = monthKey(new Date());
+  const month = all.filter((x) => monthKey(x.start.t) === thisMonth);
+  const v = await ask('Změnit cenu i u dosavadních nabíjení?', `Nová cena ${nf(price)} Kč/kWh platí pro nová nabíjení. Starší mají svou cenu uloženou.`, [
+    month.length ? { label: `Ano, ${cap(monthName(thisMonth))} (${month.length})`, value: 'month', kind: 'primary' } : null,
+    { label: `Ano, všechna (${all.length})`, value: 'all', kind: month.length ? undefined : 'primary' },
+    { label: 'Ne, jen nová', value: null, kind: 'ghost' },
+  ].filter(Boolean));
+  if (!v) return;
+  for (const x of v === 'month' ? month : all) { x.price = price; await D.saveSession(x, { silent: true }); }
+  await D.saveSession(await D.getSession((v === 'month' ? month : all)[0].id));
+  toast('Cena změněna.', { kind: 'ok' });
+}
+
+// ---------------------------------------------------------------- import ze staré tabulky
+const imp = { text: '', rows: [], status: '', msg: '', skip: new Set() };
+
+async function viewImport() {
+  const s = await D.getSettings();
+  const existing = await D.listSessions();
+  const kwInp = h('input', { type: 'text', inputmode: 'decimal', value: nf(s.kw, 1) });
+  const priceInp = h('input', { type: 'text', inputmode: 'decimal', value: nf(s.price) });
+  const ta = h('textarea', { rows: 6, placeholder: 'Datum\tdoba\tkWh\tcena\n8.11\t2,75\t5,775\t43,31\n9.11.2026\t8,2\t28,7\t215,25', value: imp.text });
+  ta.value = imp.text;
+  const statusBox = h('div', { class: 'test-out' });
+  const preview = h('div');
+  const imgInput = h('input', { type: 'file', accept: 'image/*', hidden: true });
+
+  const opts = () => ({ kw: parseNum(kwInp.value) || s.kw, price: parseNum(priceInp.value) || s.price });
+  const setRows = (raw) => {
+    imp.rows = normalizeImport(raw, opts());
+    imp.skip = new Set(imp.rows.filter((r) => findDuplicate(r, existing)).map((r) => r.day));
+    draw();
+  };
+  const fromText = () => {
+    imp.text = ta.value;
+    const raw = parseTableText(ta.value);
+    if (!raw.length) { mount(statusBox, h('p', { class: 'form-err' }, 'Nenašel jsem žádný řádek začínající datem (např. 8.11 nebo 9.11.2026).')); imp.rows = []; draw(); return; }
+    mount(statusBox);
+    setRows(raw);
+  };
+  imgInput.addEventListener('change', async () => {
+    const f = imgInput.files[0]; imgInput.value = '';
+    if (!f) return;
+    const prog = h('span', null, ` Čtu tabulku (${readerName(s)})…`);
+    mount(statusBox, h('p', { class: 'muted' }, h('span', { class: 'spin' }), prog));
+    try {
+      const { blob } = await preparePhoto(f);
+      const res = await readTable(blob, s, (m) => { prog.textContent = ` ${m}`; });
+      if (!res.rows.length) throw new Error('V obrázku jsem nenašel žádné řádky s datem.');
+      if (res.price && !parseNum(priceInp.value)) priceInp.value = nf(res.price);
+      mount(statusBox, h('p', { class: 'ok-line' }, mark('ok'), `Přečteno ${res.rows.length} ${fmt.plural(res.rows.length, 'řádek', 'řádky', 'řádků')} – zkontroluj je s tabulkou.`));
+      setRows(res.rows);
+    } catch (e) { mount(statusBox, h('p', { class: 'form-err' }, e.message)); }
+  });
+  for (const inp of [kwInp, priceInp]) inp.addEventListener('change', () => { if (imp.rows.length) fromText(); });
+
+  function draw() {
+    if (!imp.rows.length) { mount(preview); return; }
+    const chosen = imp.rows.filter((r) => !imp.skip.has(r.day));
+    const sumK = chosen.reduce((a, r) => a + r.kwh, 0), sumC = chosen.reduce((a, r) => a + r.kwh * r.price, 0);
+    mount(preview,
+      h('div', { class: 'table-wrap' }, h('table', null,
+        h('thead', null, h('tr', null, h('th', null, ''), h('th', null, 'Datum'), h('th', { class: 'n' }, 'Hodin'), h('th', { class: 'n' }, 'kWh'), h('th', { class: 'n' }, 'Kč'))),
+        h('tbody', null, imp.rows.map((r) => {
+          const dup = findDuplicate(r, existing);
+          const cb = h('input', { type: 'checkbox', checked: !imp.skip.has(r.day), 'aria-label': `Importovat ${r.day}` });
+          cb.addEventListener('change', () => { cb.checked ? imp.skip.delete(r.day) : imp.skip.add(r.day); draw(); });
+          return h('tr', { class: imp.skip.has(r.day) ? 'off' : '' },
+            h('td', null, cb),
+            h('td', null, fmt.date(r.day + 'T12:00:00'), dup ? h('small', { class: 'dup' }, `už v aplikaci (${fmt.short(dup.start.t)})`) : null),
+            h('td', { class: 'n' }, nf(r.hours, 2)),
+            h('td', { class: 'n' }, nf(r.kwh, 2)),
+            h('td', { class: 'n' }, nf(r.kwh * r.price, 2)));
+        })))),
+      h('p', { class: 'small muted' }, `Cena ${[...new Set(imp.rows.map((r) => nf(r.price)))].join(' / ')} Kč/kWh (z tabulky, jinak z pole níže). Řádky, které už v aplikaci jsou (stejný den), jsou odškrtnuté.`),
+      h('button', {
+        class: 'btn primary xl wide', disabled: !chosen.length,
+        onclick: async () => {
+          for (const r of chosen) await D.saveSession(importSession(r), { silent: true });
+          if (chosen.length) await D.saveSession(await D.getSession((await D.listSessions())[0].id));
+          toast(`Importováno ${chosen.length} ${fmt.plural(chosen.length, 'nabíjení', 'nabíjení', 'nabíjení')} · ${nf(sumK)} kWh · ${kc(sumC)}`, { kind: 'ok', timeout: 6000 });
+          imp.text = ''; imp.rows = []; imp.skip = new Set();
+          location.hash = '#/';
+        },
+      }, chosen.length ? `Importovat ${chosen.length} ${fmt.plural(chosen.length, 'nabíjení', 'nabíjení', 'nabíjení')} · ${nf(sumK, 1)} kWh · ${kc(sumC)}` : 'Nic k importu'));
+  }
+  draw();
+
+  return [
+    h('a', { class: 'back', href: '#/nastaveni' }, 'Zpět'),
+    h('div', { class: 'page-head' }, h('p', { class: 'eyebrow' }, 'Import'), h('h1', { class: 'title' }, 'Starší nabíjení z tabulky')),
+    h('p', { class: 'small' }, 'V Google Tabulkách označ řádky (Datum, doba, Spotřeba kWh, cena) → Kopírovat → vlož sem. Záhlaví a řádky s parametry klidně zkopíruj taky, přeskočí se. Nebo vyber snímek obrazovky tabulky.'),
+    h('div', { class: 'btn-row two' },
+      h('button', { class: 'btn', onclick: () => imgInput.click() }, 'Snímek tabulky'),
+      h('button', { class: 'btn ghost', onclick: async () => { try { ta.value = await navigator.clipboard.readText(); fromText(); } catch { ta.focus(); toast('Vlož text do pole dlouhým podržením → Vložit.'); } } }, 'Vložit ze schránky'),
+      imgInput),
+    h('label', { class: 'field' }, h('span', null, 'Zkopírované řádky'), ta),
+    h('button', { class: 'btn', onclick: fromText }, 'Načíst řádky'),
+    statusBox,
+    h('div', { class: 'grid2' },
+      h('label', { class: 'field' }, h('span', null, 'Výkon kW', h('em', null, ' (když chybí kWh)')), kwInp),
+      h('label', { class: 'field' }, h('span', null, 'Cena Kč/kWh', h('em', null, ' (když chybí Kč)')), priceInp)),
+    preview,
+  ];
+}

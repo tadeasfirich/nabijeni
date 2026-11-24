@@ -4,7 +4,7 @@ import { writeWorkbook, S } from './xlsx.js';
 import { calc, sumUp, round, SEASON_LABEL } from './model.js';
 import { fmt, h } from './ui.js';
 
-export const MODE_LABEL = { dobito: 'dobito do limitu', auto: 'dobito (uzavřeno automaticky)', drive: 'ukončeno dříve', rucne: 'ukončeno ručně', upraveno: 'upraveno ručně' };
+export const MODE_LABEL = { import: 'import z tabulky', dobito: 'dobito do limitu', auto: 'dobito (uzavřeno automaticky)', drive: 'ukončeno dříve', rucne: 'ukončeno ručně', upraveno: 'upraveno ručně' };
 const modeText = (s) => (s.end ? (s.end.mode === 'dobito' || s.end.mode === 'auto' ? `dobito do ${s.end.soc} %` : MODE_LABEL[s.end.mode] || '') : 'probíhá');
 
 export const nf = (v, d = 2) => (v === null || v === undefined || !Number.isFinite(Number(v)) ? '–'
@@ -33,15 +33,15 @@ export function workbook(list, { from, to, settings }) {
   const data = rows.map((s) => {
     const c = calc(s);
     return [
-      { v: new Date(s.start.t), s: S.dt },
-      s.end?.t ? { v: new Date(s.end.t), s: S.dt } : '',
+      { v: new Date(s.start.t), s: s.approxTime ? S.date : S.dt },
+      s.end?.t && !s.approxTime ? { v: new Date(s.end.t), s: S.dt } : '',
       c.hours !== null ? { v: c.hours, s: S.dec2 } : '',
-      { v: Number(s.start.soc), s: S.int },
-      { v: Number(s.end.soc), s: S.int },
-      { v: c.dSoc, s: S.int },
-      { v: c.battery, s: S.dec2 },
+      s.start.soc != null ? { v: Number(s.start.soc), s: S.int } : '',
+      s.end.soc != null ? { v: Number(s.end.soc), s: S.int } : '',
+      c.dSoc != null ? { v: c.dSoc, s: S.int } : '',
+      c.battery != null ? { v: c.battery, s: S.dec2 } : '',
       SEASON_LABEL[s.season] || '',
-      c.measured ? { v: c.realCoef ?? '', s: S.koef } : { v: Number(s.coef), s: S.koef },
+      c.imported ? '' : c.measured ? { v: c.realCoef ?? '', s: S.koef } : { v: Number(s.coef), s: S.koef },
       { v: c.grid, s: S.dec2 },
       { v: Number(s.price), s: S.money },
       { v: c.cost, s: S.money },
@@ -57,7 +57,7 @@ export function workbook(list, { from, to, settings }) {
     sum('G', S.dec2B, t.battery), '', '', sum('J', S.dec2B, t.grid), '', sum('L', S.moneyB, t.cost), '', '', '', ''].map((v, i) => (i === 0 ? { v, s: S.bold } : v));
 
   const prices = [...new Set(rows.map((s) => Number(s.price)))];
-  const coefs = (season) => [...new Set(rows.filter((s) => s.season === season && !calc(s).measured).map((s) => nf(s.coef, 2)))].join(', ');
+  const coefs = (season) => [...new Set(rows.filter((s) => s.season === season && !calc(s).measured && !calc(s).imported).map((s) => nf(s.coef, 2)))].join(', ');
   const souhrn = [
     [{ v: 'Nabíjení Kony – souhrn', s: S.title }],
     [],
@@ -69,7 +69,7 @@ export function workbook(list, { from, to, settings }) {
     [{ v: 'Spotřeba ze sítě', s: S.bold }, { v: t.grid, s: S.dec2B }, 'kWh'],
     [{ v: 'Částka', s: S.bold }, { v: t.cost, s: S.moneyB }],
     [{ v: 'Cena za kWh', s: S.bold }, prices.length === 1 ? { v: prices[0], s: S.money } : prices.length ? 'různá – viz list Nabíjení' : '–'],
-    [{ v: 'Koeficient ztrát', s: S.bold }, [coefs('zima') && `zima ${coefs('zima')}`, coefs('leto') && `léto ${coefs('leto')}`, t.measured && `${t.measured}× měřeno elektroměrem`].filter(Boolean).join(' · ') || '–'],
+    [{ v: 'Koeficient ztrát', s: S.bold }, [coefs('zima') && `zima ${coefs('zima')}`, coefs('leto') && `léto ${coefs('leto')}`, t.measured && `${t.measured}× měřeno elektroměrem`, t.imported && `${t.imported}× import z tabulky (hodiny × výkon)`].filter(Boolean).join(' · ') || '–'],
     [],
     [{ v: 'Jak se počítá', s: S.bold }, { v: 'Ze sítě = nabito % ÷ 100 × kapacita baterie × koeficient ztrát; částka = ze sítě × cena za kWh. Když je zapsaný elektroměr, platí jeho údaj.', s: S.wrap }],
     [{ v: 'Vytvořeno', s: S.muted }, { v: fmt.dt(new Date()), s: S.muted }],
@@ -102,14 +102,15 @@ export function printReport(list, { from, to, settings }) {
   const t = sumUp(rows);
   const box = document.getElementById('print');
   const timeRange = (s) => {
+    if (s.approxTime) return `${nf(calc(s).hours, 2)} h`;
     const a = new Date(s.start.t), b = new Date(s.end.t);
     const sameDay = a.toDateString() === b.toDateString();
     return `${fmt.time(a)} – ${sameDay ? '' : `${b.getDate()}. ${b.getMonth() + 1}. `}${fmt.time(b)}`;
   };
   const prices = [...new Set(rows.map((s) => Number(s.price)))];
-  const seasons = [...new Set(rows.map((s) => s.season))];
+  const seasons = [...new Set(rows.map((s) => s.season).filter(Boolean))];
   const coefTxt = seasons.map((se) => {
-    const cs = [...new Set(rows.filter((s) => s.season === se && !calc(s).measured).map((s) => nf(s.coef, 2)))];
+    const cs = [...new Set(rows.filter((s) => s.season === se && !calc(s).measured && !calc(s).imported).map((s) => nf(s.coef, 2)))];
     return cs.length ? `${SEASON_LABEL[se]} × ${cs.join(' / ')}` : null;
   }).filter(Boolean).join(', ');
 
@@ -130,10 +131,10 @@ export function printReport(list, { from, to, settings }) {
         return h('tr', null,
           h('td', null, fmt.date(s.start.t)),
           h('td', null, timeRange(s)),
-          h('td', null, `${s.start.soc} → ${s.end.soc} %`, s.end.mode === 'drive' ? h('small', null, ' dříve') : null),
-          h('td', { class: 'n' }, `${c.dSoc} %`),
-          h('td', { class: 'n' }, nf(c.battery)),
-          h('td', { class: 'n' }, c.measured ? h('span', null, 'měř.') : nf(s.coef)),
+          h('td', null, c.imported ? 'import' : `${s.start.soc} → ${s.end.soc} %`, s.end.mode === 'drive' ? h('small', null, ' dříve') : null),
+          h('td', { class: 'n' }, c.imported ? '–' : `${c.dSoc} %`),
+          h('td', { class: 'n' }, c.imported ? '–' : nf(c.battery)),
+          h('td', { class: 'n' }, c.imported ? 'čas' : c.measured ? h('span', null, 'měř.') : nf(s.coef)),
           h('td', { class: 'n' }, nf(c.grid)),
           h('td', { class: 'n' }, nf(c.cost)));
       })),
@@ -143,7 +144,8 @@ export function printReport(list, { from, to, settings }) {
     h('footer', { class: 'p-foot' },
       h('p', null, h('b', null, 'Výpočet: '), `ze sítě = nabito % × ${nf(settings.capacity, 0)} kWh × koeficient ztrát (${coefTxt || '–'}); `,
         `částka = ze sítě × ${prices.length === 1 ? `${nf(prices[0])} Kč/kWh` : 'cena za kWh u nabíjení'}.`,
-        t.measured ? ` ${t.measured}× je místo výpočtu údaj z elektroměru (měř.).` : ''),
+        t.measured ? ` ${t.measured}× je místo výpočtu údaj z elektroměru (měř.).` : '',
+        t.imported ? ` ${t.imported}× import ze staré tabulky – kWh = hodiny × výkon (čas).` : ''),
       h('p', null, `kWh v tabulce jsou v kWh, částky v Kč. Vytvořeno ${fmt.dt(new Date())}.`)),
   );
   document.body.classList.add('printing');
@@ -156,6 +158,7 @@ export function printReport(list, { from, to, settings }) {
 export function calcLine(sess) {
   const c = calc(sess);
   if (c.grid === null) return '';
+  if (c.imported) return `${nf(c.hours)} h · ${nf(sess.importKwh, 3)} kWh × ${nf(sess.price)} Kč = ${kc(c.cost)}`;
   if (c.measured) return `${c.dSoc} % = ${nf(c.battery)} kWh do baterie · elektroměr ${nf(c.grid)} kWh (koef. ${nf(c.realCoef, 3)}) · ${kc(c.cost)}`;
   return `${c.dSoc} % × ${nf(sess.capacity, 0)} kWh = ${nf(c.battery)} kWh × ${nf(sess.coef)} = ${nf(c.grid)} kWh × ${nf(sess.price)} Kč = ${kc(c.cost)}`;
 }
