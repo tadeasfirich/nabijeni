@@ -113,7 +113,8 @@ export function calc(sess) {
     if (out.battery !== null) {
       // kontrola: ze sítě musí být víc než do baterie a ztráty nemůžou být obří
       const r = out.timeKwh && out.battery ? out.timeKwh / out.battery : null;
-      const timeOk = out.timeKwh > 0 && (out.battery === 0 || (r >= 1 && r <= 1.6));
+      // konec zadaný jen časem: % je dopočítané z času, kontrola by nedávala smysl
+      const timeOk = out.timeKwh > 0 && (en?.socEstimated || out.battery === 0 || (r >= 1 && r <= 1.6));
       if (out.timeKwh > 0 && !timeOk) out.warn = `Doba × výkon (${round(out.timeKwh, 2)} kWh) nesedí s nabitými % – zkontroluj čas konce a výkon. Použit odhad podle % baterie.`;
       if (hasMeter) { gridRaw = meter; out.method = 'meter'; }
       else if (timeOk) { gridRaw = out.timeKwhRaw; out.method = 'time'; }
@@ -325,4 +326,21 @@ export function importCoef(given, date, settings) {
 // Starší importy (bez koeficientu) → doplnit koeficient podle data.
 export function needsCoef(s) {
   return s && !s.deleted && s.source === 'import' && (s.coef === null || s.coef === undefined);
+}
+
+// Odhad stavu baterie v čase t (když známe jen čas, kdy se přestalo nabíjet).
+// Rychlost bere z údaje auta „Do dobití zbývá“ (cíl − start) ÷ minuty, jinak z výkonu ÷ koeficient.
+export function socAt(sess, t) {
+  const st = sess?.start;
+  if (!st || num(st.soc) === null) return null;
+  const target = num(sess.target) ?? num(st.target) ?? DEFAULTS.target;
+  const mins = (Date.parse(t) - Date.parse(st.t)) / 60000;
+  if (!(mins > 0)) return num(st.soc);
+  let rate;
+  if (num(st.remainMin) > 0 && target > num(st.soc)) rate = (target - num(st.soc)) / num(st.remainMin);
+  else {
+    const kw = num(st.kw) ?? num(sess.kw) ?? DEFAULTS.kw;
+    rate = kw / (num(sess.coef) ?? 1.25) / (num(sess.capacity) ?? DEFAULTS.capacity) * 100 / 60;
+  }
+  return Math.min(Math.max(target, num(st.soc)), Math.round(num(st.soc) + rate * mins));
 }

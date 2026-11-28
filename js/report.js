@@ -4,7 +4,7 @@ import { writeWorkbook, S } from './xlsx.js';
 import { calc, sumUp, round, SEASON_LABEL, METHOD_LABEL } from './model.js';
 import { fmt, h } from './ui.js';
 
-export const MODE_LABEL = { import: 'import z tabulky', dobito: 'dobito do limitu', auto: 'dobito (uzavřeno automaticky)', drive: 'ukončeno dříve', rucne: 'ukončeno ručně', upraveno: 'upraveno ručně' };
+export const MODE_LABEL = { cas: 'konec podle času odjezdu (% odhadem)', import: 'import z tabulky', dobito: 'dobito do limitu', auto: 'dobito (uzavřeno automaticky)', drive: 'ukončeno dříve', rucne: 'ukončeno ručně', upraveno: 'upraveno ručně' };
 const modeText = (s) => (s.end ? (s.end.mode === 'dobito' || s.end.mode === 'auto' ? `dobito do ${s.end.soc} %` : MODE_LABEL[s.end.mode] || '') : 'probíhá');
 
 export const nf = (v, d = 2) => (v === null || v === undefined || !Number.isFinite(Number(v)) ? '–'
@@ -127,7 +127,7 @@ export function printReport(list, { from, to, settings }) {
         return h('tr', null,
           h('td', null, fmt.date(s.start.t)),
           h('td', null, timeRange(s)),
-          h('td', null, c.imported ? 'import' : `${s.start.soc} → ${s.end.soc} %`, s.end.mode === 'drive' ? h('small', null, ' dříve') : null),
+          h('td', null, c.imported ? 'import' : `${s.start.soc} → ${s.end.socEstimated ? '~' : ''}${s.end.soc} %`, s.end.mode === 'drive' ? h('small', null, ' dříve') : null),
           h('td', { class: 'n' }, c.battery != null ? `${nf(c.battery)}${c.batteryEstimated ? '*' : ''}` : '–'),
           h('td', { class: 'n' }, c.chargeHours != null && c.kw ? `${nf(c.chargeHours)} h × ${nf(c.kw, 1)}` : '–'),
           h('td', { class: 'n' }, nf(c.grid), tag[c.method] ? h('small', null, ` ${tag[c.method]}`) : null),
@@ -139,6 +139,7 @@ export function printReport(list, { from, to, settings }) {
     h('footer', { class: 'p-foot' },
       h('p', null, h('b', null, 'Výpočet: '), 'ze sítě = doba nabíjení × výkon zobrazený autem (to je odběr ze zásuvky); ',
         `do baterie = nabito % × ${nf(settings.capacity, 0)} kWh; částka = ze sítě × ${prices.length === 1 ? `${nf(prices[0])} Kč/kWh` : 'cena za kWh u nabíjení'}.`,
+        rows.some((s) => s.end?.socEstimated) ? ' ~ = konec zadaný jen časem odjezdu, % baterie odhadem.' : '',
         rows.some((s) => calc(s).method === 'soc') ? ' odh. = chyběl čas nebo výkon, odhad nabito % × kapacita × koeficient.' : '',
         t.measured ? ' měř. = údaj z elektroměru.' : '',
         t.imported ? ' tab. = import ze staré tabulky, * do baterie odhadem.' : ''),

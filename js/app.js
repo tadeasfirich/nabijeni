@@ -5,7 +5,7 @@
 import { h, mount, mark, toast, modal, ask, confirmDialog, formDialog, fmt, downloadBlob, uid } from './ui.js';
 import * as D from './data.js';
 import { parseTableText, normalizeImport, findDuplicate, importSession, needsCoef, importCoef } from './model.js';
-import { METHOD_LABEL } from './model.js';
+import { METHOD_LABEL, socAt } from './model.js';
 import { calc, sumUp, calibration, check, coefFor, seasonFor, estimatedEnd, overdue, isRunning, monthKey, monthRange, inRange, SEASON_LABEL, round, DEFAULTS } from './model.js';
 import { preparePhoto } from './photo.js';
 import { readPhoto, readTable, readerReady, readerName } from './reader.js';
@@ -136,7 +136,7 @@ async function autoFinish() {
     if (due.length) {
       const c = calc(due[0]);
       toast(due.length === 1
-        ? `Nabíjení od ${fmt.short(due[0].start.t)} uzavřeno jako dobito do ${due[0].end.soc} % (${nf(c.grid)} kWh · ${kc(c.cost)}). Jinak? Otevři ho a uprav.`
+        ? `Nabíjení od ${fmt.short(due[0].start.t)} uzavřeno jako dobito do ${due[0].end.soc} % (${nf(c.grid)} kWh · ${kc(c.cost)}). Odjel jsi dřív? Otevři ho → Konec jen časem odjezdu.`
         : `Uzavřeno ${due.length} nabíjení jako dobito. Jinak? Otevři je a uprav.`, { kind: 'ok', timeout: 8000 });
       if (syncConfigured(s)) markDirty();
     }
@@ -232,7 +232,7 @@ function sessRow(x) {
     h('span', { class: 'grow' },
       h('b', null, `${fmt.date(x.start.t)} `, x.approxTime ? null : h('span', { class: 'muted' }, fmt.time(x.start.t))),
       h('small', null, x.status === 'running' ? `${x.start.soc} % → nabíjí se` : c.imported ? `import z tabulky · ${nf(c.hours, 2)} h` :
-        `${x.start.soc} → ${x.end?.soc ?? '?'} %${x.end?.mode === 'drive' ? ' · dříve' : ''}${c.measured ? ' · elektroměr' : ''}`)),
+        `${x.start.soc} → ${x.end?.socEstimated ? '~' : ''}${x.end?.soc ?? '?'} %${x.end?.mode === 'drive' ? ' · dříve' : ''}${x.end?.mode === 'cas' ? ' · čas odjezdu' : ''}${c.measured ? ' · elektroměr' : ''}`)),
     x.status === 'done' ? h('span', { class: 'row-num' }, h('b', null, `${nf(c.grid, 1)} kWh`), h('small', null, kc(c.cost))) : null,
     h('span', { class: 'chev' }));
 }
@@ -257,10 +257,66 @@ function runningCard(run, s) {
     h('div', { class: 'btn-col' },
       h('button', { class: 'btn primary xl on-dark', onclick: () => finishAtTarget(run) }, `Dobito – ${target} %`),
       h('button', { class: 'btn xl', onclick: () => pickPhoto('end', 'camera', run.id) }, cameraIco(), 'Ukončit dříve – vyfotit'),
+      h('button', { class: 'btn xl dark', onclick: () => endByTime(run) }, 'Odjel jsem – znám jen čas'),
       h('div', { class: 'btn-row two' },
         h('button', { class: 'btn dark small', onclick: () => pickPhoto('end', 'gallery', run.id) }, 'Fotka z galerie'),
         h('button', { class: 'btn dark small', onclick: () => startDraft('end', run.id, null) }, 'Zadat ručně'))),
     h('p', { class: 'run-links' }, h('a', { href: `#/n/${run.id}` }, 'Detail a úpravy')));
+}
+
+// Konec jen časem: zadá se, kdy se přestalo nabíjet (odjezd), % baterie se dopočítá.
+async function endByTime(sess) {
+  const s = await D.getSettings();
+  const est = estimatedEnd(sess);
+  const def = sess.end?.t && sess.end.mode !== 'auto' && sess.end.mode !== 'dobito' ? sess.end.t
+    : est && Date.parse(est) < Date.now() ? est : new Date().toISOString();
+  const tInp = h('input', { type: 'datetime-local', value: toLocalInput(def), autofocus: true });
+  const out = h('div', { class: 'box fill calc' });
+  const err = h('p', { class: 'form-err', hidden: true });
+  const saveBtn = h('button', { class: 'btn primary wide' }, 'Uložit konec');
+  const preview = () => {
+    const t = fromLocalInput(tInp.value);
+    err.hidden = true;
+    if (!t) { saveBtn.disabled = true; mount(out, h('p', { class: 'muted' }, 'Zadej čas.')); return null; }
+    if (Date.parse(t) <= Date.parse(sess.start.t)) { err.textContent = 'Konec musí být po začátku nabíjení.'; err.hidden = false; saveBtn.disabled = true; mount(out); return null; }
+    if (Date.parse(t) > Date.now() + 10 * 60000) { err.textContent = 'Čas je v budoucnosti.'; err.hidden = false; saveBtn.disabled = true; mount(out); return null; }
+    const soc = socAt(sess, t);
+    const target = sess.target ?? s.target;
+    const end = { t, soc, mode: soc >= target ? 'dobito' : 'cas', socEstimated: soc < target };
+    const p = { ...sess, end, status: 'done', meterKwh: sess.meterKwh };
+    const c = calc(p);
+    saveBtn.disabled = false;
+    mount(out,
+      h('p', { class: 'calc-big' }, h('b', null, `${nf(c.grid)} kWh`), h('span', null, ` · ${kc(c.cost)}`)),
+      h('p', { class: 'small muted' }, calcLine(p)),
+      h('p', { class: 'small muted' }, soc >= target
+        ? `V tu dobu už bylo dobito do ${target} % (asi ${fmt.short(est)}) – počítá se jen do dobití.`
+        : `Baterie odhadem ~${soc} % (start ${sess.start.soc} %${sess.start.remainMin ? `, auto nabíjí asi ${nf((target - sess.start.soc) / (sess.start.remainMin / 60), 1)} % za hodinu` : ''}).`));
+    return end;
+  };
+  tInp.addEventListener('input', preview);
+  modal((close) => {
+    saveBtn.onclick = async () => {
+      const end = preview();
+      if (!end) return;
+      const fresh = await D.getSession(sess.id);
+      fresh.end = end;
+      fresh.status = 'done';
+      await D.saveSession(fresh);
+      close();
+      const c = calc(fresh);
+      toast(`Uloženo: ${nf(c.grid)} kWh · ${kc(c.cost)}`, { kind: 'ok' });
+      render();
+    };
+    return [
+      h('h3', null, 'Kdy jsi přestal nabíjet?'),
+      h('p', { class: 'small muted' }, `Nabíjení od ${fmt.short(sess.start.t)} na ${sess.start.soc} %. Zadej čas odjezdu – ze sítě = doba × ${nf(calc(sess).kw ?? sess.kw ?? s.kw, 1)} kW, stav baterie se odhadne.`),
+      h('label', { class: 'field' }, h('span', null, 'Konec nabíjení (odjezd)'), tInp),
+      err, out,
+      h('div', { class: 'btn-col' }, saveBtn, h('button', { class: 'btn ghost wide', onclick: close }, 'Zpět')),
+    ];
+  });
+  preview();
 }
 
 async function finishAtTarget(run) {
@@ -555,7 +611,7 @@ async function viewDetail(id) {
   ].filter(Boolean) : [
     ['Začátek', `${fmt.dt(x.start.t)} · ${x.start.soc} %`],
     x.start.remainMin != null ? ['Do dobití zbývalo', duration(x.start.remainMin)] : null,
-    x.end ? ['Konec', `${fmt.dt(x.end.t)} · ${x.end.soc} % · ${x.end.mode === 'dobito' ? `dobito do ${x.end.soc} %` : MODE_LABEL[x.end.mode] || ''}`] : ['Konec', 'nabíjí se'],
+    x.end ? ['Konec', `${fmt.dt(x.end.t)} · ${x.end.socEstimated ? '~' : ''}${x.end.soc} % · ${x.end.mode === 'dobito' ? `dobito do ${x.end.soc} %` : MODE_LABEL[x.end.mode] || ''}`] : ['Konec', 'nabíjí se'],
     c.chargeHours !== null ? ['Doba nabíjení', `${duration(c.chargeHours * 60)}${c.hours !== null && c.chargeHours < c.hours - 0.02 ? ' (do dobití, pak už auto stálo)' : ''}`] : null,
     c.kw ? ['Výkon', `${nf(c.kw, 1)} kW (odběr ze zásuvky)`] : null,
     ['Tachometr', x.start.odo ? `${x.start.odo.toLocaleString('cs-CZ')} km` : '–'],
@@ -596,6 +652,7 @@ async function viewDetail(id) {
       }, 'Uložit'))) : null,
     h('div', { class: 'btn-row actions' },
       h('button', { class: 'btn', onclick: () => editSession(x) }, 'Upravit'),
+      x.status === 'done' && !c.imported ? h('button', { class: 'btn', onclick: () => endByTime(x) }, 'Konec jen časem odjezdu') : null,
       h('button', { class: 'btn ghost', onclick: async () => {
         if (!(await confirmDialog('Smazat nabíjení?', `${fmt.date(x.start.t)} · ${nf(c.grid)} kWh. Smaže se i ze zálohy.`, 'Smazat', 'Nechat'))) return;
         await D.deleteSession(x.id);
